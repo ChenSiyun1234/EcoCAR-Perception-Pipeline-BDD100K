@@ -252,6 +252,64 @@ def link_or_copy_images(
     return count
 
 
+# ── Find expected images (robust, multi-directory) ───────────────────────────
+
+def find_expected_images(
+    label_dir: str,
+    image_src_dirs,
+) -> Tuple[List[str], str]:
+    """
+    Find images matching label files, searching multiple candidate directories.
+
+    For each .txt label file, looks for a matching .jpg/.jpeg/.png in each
+    candidate source directory (in order).  Returns the list of found image
+    filenames AND the directory where they were found (assumes all come from
+    the same dir — uses the first successful match to determine the dir).
+
+    Args:
+        label_dir:      Directory containing YOLO .txt label files.
+        image_src_dirs: A single path (str) or list of paths to search for images.
+
+    Returns:
+        (list_of_image_filenames, source_directory)
+        source_directory is the path where the first match was found.
+    """
+    if isinstance(image_src_dirs, str):
+        image_src_dirs = [image_src_dirs]
+
+    # Filter to directories that actually exist
+    valid_dirs = [d for d in image_src_dirs if os.path.isdir(d)]
+    if not valid_dirs:
+        print(f"⚠ No valid image source directories found among: {image_src_dirs}")
+        return [], ""
+
+    # Build a lookup: stem -> (filename, directory) using the first dir that has it
+    # To avoid calling os.listdir on huge Drive folders (FUSE is slow),
+    # we instead iterate over label files and probe for existence.
+    label_files = sorted([f for f in os.listdir(label_dir) if f.endswith(".txt")])
+
+    expected = []
+    source_dir = ""
+
+    for lf in tqdm(label_files, desc="Matching labels→images"):
+        stem = os.path.splitext(lf)[0]
+        found = False
+        for d in valid_dirs:
+            for ext in [".jpg", ".jpeg", ".png"]:
+                candidate = stem + ext
+                full_path = os.path.join(d, candidate)
+                if os.path.exists(full_path):
+                    expected.append(candidate)
+                    if not source_dir:
+                        source_dir = d
+                    found = True
+                    break
+            if found:
+                break
+
+    return expected, source_dir
+
+
 # ── Print class distribution ─────────────────────────────────────────────────
 
 def print_class_distribution(class_counts: Dict[str, int]) -> None:
