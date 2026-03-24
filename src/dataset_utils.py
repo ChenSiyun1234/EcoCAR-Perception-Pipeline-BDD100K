@@ -261,10 +261,12 @@ def find_expected_images(
     """
     Find images matching label files, searching multiple candidate directories.
 
-    For each .txt label file, looks for a matching .jpg/.jpeg/.png in each
-    candidate source directory (in order).  Returns the list of found image
-    filenames AND the directory where they were found (assumes all come from
-    the same dir — uses the first successful match to determine the dir).
+    Uses os.listdir() ONCE per directory to build an in-memory lookup set,
+    then matches label stems against it.  This is MUCH faster than calling
+    os.path.exists() per file on Google Drive FUSE (~20K stat calls → timeout).
+
+    Symlink directories are deprioritized (moved to end) because Google Drive
+    FUSE often fails to list them properly.
 
     Args:
         label_dir:      Directory containing YOLO .txt label files.
@@ -272,42 +274,63 @@ def find_expected_images(
 
     Returns:
         (list_of_image_filenames, source_directory)
-        source_directory is the path where the first match was found.
+        source_directory is the path where matches were found.
     """
     if isinstance(image_src_dirs, str):
         image_src_dirs = [image_src_dirs]
 
-    # Filter to directories that actually exist
-    valid_dirs = [d for d in image_src_dirs if os.path.isdir(d)]
-    if not valid_dirs:
+    # Filter to directories that actually exist, deprioritize symlinks
+    real_dirs = [d for d in image_src_dirs if os.path.isdir(d) and not os.path.islink(d)]
+    link_dirs = [d for d in image_src_dirs if os.path.isdir(d) and os.path.islink(d)]
+    ordered_dirs = real_dirs + link_dirs  # real dirs first
+
+    if not ordered_dirs:
         print(f"⚠ No valid image source directories found among: {image_src_dirs}")
         return [], ""
 
-    # Build a lookup: stem -> (filename, directory) using the first dir that has it
-    # To avoid calling os.listdir on huge Drive folders (FUSE is slow),
-    # we instead iterate over label files and probe for existence.
+    # Build in-memory lookup: for each candidate dir, list all image files ONCE
+    # This avoids per-file os.path.exists() which is painfully slow on Drive FUSE
+    dir_image_sets = {}  # dir -> set of image filenames (lowercase stem -> original filename)
+    chosen_dir = ""
+
+    for d in ordered_dirs:
+        try:
+            files = os.listdir(d)
+            img_files = [f for f in files if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+            # Build stem -> filename mapping for fast lookup
+            stem_map = {}
+            for f in img_files:
+                stem = os.path.splitext(f)[0]
+                if stem not in stem_map:  # keep first match
+                    stem_map[stem] = f
+            dir_image_sets[d] = stem_map
+            if stem_map:
+                print(f"  📁 Indexed {len(stem_map)} images from: {d}")
+        except OSError as e:
+            print(f"  ⚠ Cannot list {d}: {e}")
+            continue
+
+    if not dir_image_sets:
+        print("⚠ Could not list any image directories")
+        return [], ""
+
+    # Get label stems
     label_files = sorted([f for f in os.listdir(label_dir) if f.endswith(".txt")])
+    label_stems = [os.path.splitext(f)[0] for f in label_files]
 
+    # Match labels against image sets (in directory priority order)
     expected = []
-    source_dir = ""
-
-    for lf in tqdm(label_files, desc="Matching labels→images"):
-        stem = os.path.splitext(lf)[0]
-        found = False
-        for d in valid_dirs:
-            for ext in [".jpg", ".jpeg", ".png"]:
-                candidate = stem + ext
-                full_path = os.path.join(d, candidate)
-                if os.path.exists(full_path):
-                    expected.append(candidate)
-                    if not source_dir:
-                        source_dir = d
-                    found = True
-                    break
-            if found:
+    for stem in label_stems:
+        for d in ordered_dirs:
+            if d not in dir_image_sets:
+                continue
+            if stem in dir_image_sets[d]:
+                expected.append(dir_image_sets[d][stem])
+                if not chosen_dir:
+                    chosen_dir = d
                 break
 
-    return expected, source_dir
+    return expected, chosen_dir
 
 
 # ── Print class distribution ─────────────────────────────────────────────────
