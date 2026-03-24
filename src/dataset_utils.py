@@ -204,6 +204,7 @@ def link_or_copy_images(
     dst_dir: str,
     use_symlinks: bool = True,
     debug_limit: Optional[int] = None,
+    image_list: Optional[List[str]] = None,
 ) -> int:
     """
     Populate dst_dir with images from src_dir (symlink on Linux, copy on Windows).
@@ -213,13 +214,20 @@ def link_or_copy_images(
         dst_dir:      Destination image directory.
         use_symlinks: Try symlinks first (fast, saves disk on Colab).
         debug_limit:  If set, only link/copy this many images.
+        image_list:   Provide exact list of filenames to bypass FUSE os.listdir.
 
     Returns:
         Number of images linked/copied.
     """
     os.makedirs(dst_dir, exist_ok=True)
-    # Only link image files (skip JSONs that may be mixed in the folder)
-    files = sorted([f for f in os.listdir(src_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+    if image_list is not None:
+        files = image_list
+    else:
+        try:
+            files = sorted([f for f in os.listdir(src_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+        except OSError:
+            print(f"⚠ OSError listing {src_dir}. Provide image_list manually to bypass.")
+            return 0
     if debug_limit:
         files = files[:debug_limit]
 
