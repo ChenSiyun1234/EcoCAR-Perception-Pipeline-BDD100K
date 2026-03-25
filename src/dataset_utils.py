@@ -252,7 +252,7 @@ def link_or_copy_images(
     return count
 
 
-# ── Find expected images (robust, multi-directory) ───────────────────────────
+# ── Find expected images (robust, FUSE-safe) ─────────────────────────────────
 
 def find_expected_images(
     label_dir: str,
@@ -261,73 +261,77 @@ def find_expected_images(
     """
     Find images matching label files, searching multiple candidate directories.
 
-    Uses os.listdir() ONCE per directory to build an in-memory lookup set,
-    then matches label stems against it.  This is MUCH faster than calling
-    os.path.exists() per file on Google Drive FUSE (~20K stat calls → timeout).
+    Designed to work on Google Drive FUSE where:
+      - os.listdir() crashes on dirs with ~40K files
+      - Per-file os.path.exists() × 20K files causes FUSE timeout
 
-    Symlink directories are deprioritized (moved to end) because Google Drive
-    FUSE often fails to list them properly.
+    Strategy:
+      1. Read label stems from the LOCAL (fast) label directory
+      2. For each candidate source dir, probe a SMALL sample (10 files)
+         to test if the directory is responsive and contains matches
+      3. Once a working dir is found, do the full match with os.path.exists()
+      4. Return the full list of matched image filenames
+
+    Symlink directories are deprioritized since FUSE is unreliable with them.
 
     Args:
         label_dir:      Directory containing YOLO .txt label files.
-        image_src_dirs: A single path (str) or list of paths to search for images.
+        image_src_dirs: A single path (str) or list of paths to search.
 
     Returns:
         (list_of_image_filenames, source_directory)
-        source_directory is the path where matches were found.
     """
     if isinstance(image_src_dirs, str):
         image_src_dirs = [image_src_dirs]
 
-    # Filter to directories that actually exist, deprioritize symlinks
+    # Deprioritize symlinks (FUSE errors)
     real_dirs = [d for d in image_src_dirs if os.path.isdir(d) and not os.path.islink(d)]
     link_dirs = [d for d in image_src_dirs if os.path.isdir(d) and os.path.islink(d)]
-    ordered_dirs = real_dirs + link_dirs  # real dirs first
+    ordered_dirs = real_dirs + link_dirs
 
     if not ordered_dirs:
         print(f"⚠ No valid image source directories found among: {image_src_dirs}")
         return [], ""
 
-    # Build in-memory lookup: for each candidate dir, list all image files ONCE
-    # This avoids per-file os.path.exists() which is painfully slow on Drive FUSE
-    dir_image_sets = {}  # dir -> set of image filenames (lowercase stem -> original filename)
-    chosen_dir = ""
-
-    for d in ordered_dirs:
-        try:
-            files = os.listdir(d)
-            img_files = [f for f in files if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-            # Build stem -> filename mapping for fast lookup
-            stem_map = {}
-            for f in img_files:
-                stem = os.path.splitext(f)[0]
-                if stem not in stem_map:  # keep first match
-                    stem_map[stem] = f
-            dir_image_sets[d] = stem_map
-            if stem_map:
-                print(f"  📁 Indexed {len(stem_map)} images from: {d}")
-        except OSError as e:
-            print(f"  ⚠ Cannot list {d}: {e}")
-            continue
-
-    if not dir_image_sets:
-        print("⚠ Could not list any image directories")
-        return [], ""
-
-    # Get label stems
+    # Get label stems from LOCAL label dir (fast Colab SSD, no FUSE issue)
     label_files = sorted([f for f in os.listdir(label_dir) if f.endswith(".txt")])
     label_stems = [os.path.splitext(f)[0] for f in label_files]
+    print(f"  📝 {len(label_stems)} label files to match")
 
-    # Match labels against image sets (in directory priority order)
+    if not label_stems:
+        return [], ""
+
+    # For each candidate dir, PROBE a small sample to find a working directory
+    PROBE_SIZE = 10
+    probe_stems = label_stems[:PROBE_SIZE]
+
+    chosen_dir = ""
+    for d in ordered_dirs:
+        hits = 0
+        for stem in probe_stems:
+            for ext in [".jpg", ".jpeg", ".png"]:
+                if os.path.exists(os.path.join(d, stem + ext)):
+                    hits += 1
+                    break
+        if hits > 0:
+            print(f"  ✅ Probe: {hits}/{PROBE_SIZE} found in {d}")
+            chosen_dir = d
+            break
+        else:
+            print(f"  ❌ Probe: 0/{PROBE_SIZE} found in {d}")
+
+    if not chosen_dir:
+        print("⚠ No directory responded to probe. Returning empty list.")
+        return [], ""
+
+    # Full match against the chosen directory
+    print(f"  🔍 Full matching against: {chosen_dir}")
     expected = []
-    for stem in label_stems:
-        for d in ordered_dirs:
-            if d not in dir_image_sets:
-                continue
-            if stem in dir_image_sets[d]:
-                expected.append(dir_image_sets[d][stem])
-                if not chosen_dir:
-                    chosen_dir = d
+    for stem in tqdm(label_stems, desc="Matching"):
+        for ext in [".jpg", ".jpeg", ".png"]:
+            candidate = stem + ext
+            if os.path.exists(os.path.join(chosen_dir, candidate)):
+                expected.append(candidate)
                 break
 
     return expected, chosen_dir
