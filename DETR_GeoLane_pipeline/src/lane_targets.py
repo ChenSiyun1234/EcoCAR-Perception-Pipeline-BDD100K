@@ -261,8 +261,10 @@ class LaneLabelCache:
                     if not image_name:
                         image_name = os.path.splitext(name)[0] + ".jpg"
                     if lane_labels:
-                        self._cache[image_name] = lane_labels
-                        file_cached = True
+                        targets = frame_to_lane_targets(lane_labels, self.max_lanes, self.num_points)
+                        if float(targets["existence"].sum()) > 0:
+                            self._cache[image_name] = lane_labels
+                            file_cached = True
                 if file_cached:
                     count += 1
             print(f"  Cached lane labels for {len(self._cache)} frames")
@@ -307,7 +309,9 @@ class LaneLabelCache:
             for rec in records:
                 image_name, lane_labels = _extract_lane_labels_from_record(rec)
                 if image_name and lane_labels:
-                    self._cache[image_name] = lane_labels
+                    targets = frame_to_lane_targets(lane_labels, self.max_lanes, self.num_points)
+                    if float(targets["existence"].sum()) > 0:
+                        self._cache[image_name] = lane_labels
             print(f"  Cached lane labels for {len(self._cache)} frames")
         else:
             print(f"  No lane labels found at: {source_path}")
