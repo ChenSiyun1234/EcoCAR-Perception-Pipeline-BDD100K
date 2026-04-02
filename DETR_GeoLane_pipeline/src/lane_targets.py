@@ -160,19 +160,11 @@ def frame_to_lane_targets(labels: List[dict], max_lanes: int = 10,
 
 
 class LaneLabelCache:
-    """Loads and caches BDD100K lane annotations from consolidated JSON.
+    """Loads and caches BDD100K lane annotations.
 
-    The BDD100K consolidated label file is a JSON list of frame dicts:
-    [
-      {
-        "name": "xxx.jpg",
-        "labels": [
-          {"category": "lane/single white", "poly2d": [...], ...},
-          ...
-        ]
-      },
-      ...
-    ]
+    Supported sources:
+      1) consolidated JSON file
+      2) directory of per-image JSON files, e.g. /content/bdd100k_labels_unzipped/100k/train
     """
 
     def __init__(self, json_path: str, max_lanes: int = 10,
@@ -180,30 +172,74 @@ class LaneLabelCache:
         self.max_lanes = max_lanes
         self.num_points = num_points
         self._cache: Dict[str, List[dict]] = {}
+        self.source = json_path
 
-        if json_path and os.path.isfile(json_path):
-            print(f"Loading lane labels from {json_path} ...")
-            with open(json_path, "r") as f:
-                data = json.load(f)
-            for frame in data:
-                name = frame.get("name", "")
-                labels = frame.get("labels") or []
-                # Only cache frames that have lane annotations
-                lane_labels = [l for l in labels
-                               if l.get("category", "").startswith("lane/")]
-                if lane_labels:
-                    self._cache[name] = lane_labels
-            print(f"  Cached lane labels for {len(self._cache)} frames")
+        if not json_path:
+            print("  No lane labels source provided")
+            return
+
+        if os.path.isdir(json_path):
+            self._load_from_directory(json_path)
+        elif os.path.isfile(json_path):
+            self._load_from_file(json_path)
         else:
             print(f"  No lane labels found at: {json_path}")
 
+    def _cache_frame(self, name: str, labels: List[dict]) -> None:
+        if not name:
+            return
+        lane_labels = [l for l in labels if l.get("category", "").startswith("lane/")]
+        if lane_labels:
+            self._cache[name] = lane_labels
+
+    def _load_from_file(self, json_path: str) -> None:
+        print(f"Loading lane labels from file {json_path} ...")
+        with open(json_path, "r") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            for frame in data:
+                if not isinstance(frame, dict):
+                    continue
+                name = frame.get("name", "")
+                labels = frame.get("labels") or []
+                self._cache_frame(name, labels)
+        elif isinstance(data, dict):
+            name = data.get("name", "")
+            labels = data.get("labels") or []
+            if not name and json_path.lower().endswith('.json'):
+                name = os.path.splitext(os.path.basename(json_path))[0] + '.jpg'
+            self._cache_frame(name, labels)
+        print(f"  Cached lane labels for {len(self._cache)} frames")
+
+    def _load_from_directory(self, dir_path: str) -> None:
+        print(f"Loading lane labels from directory {dir_path} ...")
+        files = sorted([f for f in os.listdir(dir_path) if f.lower().endswith('.json')])
+        for fname in files:
+            path = os.path.join(dir_path, fname)
+            try:
+                with open(path, 'r') as f:
+                    data = json.load(f)
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                name = data.get('name') or (os.path.splitext(fname)[0] + '.jpg')
+                labels = data.get('labels') or []
+                self._cache_frame(name, labels)
+            elif isinstance(data, list):
+                # rare fallback if a file unexpectedly contains a list
+                for frame in data:
+                    if not isinstance(frame, dict):
+                        continue
+                    name = frame.get('name') or (os.path.splitext(fname)[0] + '.jpg')
+                    labels = frame.get('labels') or []
+                    self._cache_frame(name, labels)
+        print(f"  Cached lane labels for {len(self._cache)} frames")
+
     def get(self, image_name: str) -> Optional[Dict[str, np.ndarray]]:
-        """Get structured lane targets for an image, or None if no lanes."""
         labels = self._cache.get(image_name)
         if labels is None:
             return None
-        return frame_to_lane_targets(
-            labels, self.max_lanes, self.num_points)
+        return frame_to_lane_targets(labels, self.max_lanes, self.num_points)
 
     def __len__(self):
         return len(self._cache)

@@ -71,7 +71,6 @@ def _raw_roots() -> List[str]:
     """Candidate extraction roots for raw BDD labels/images."""
     y = _safe_load_paths_yaml()
     roots = []
-    # notebook02/07 style custom raw roots, if present
     for k in [
         'bdd_raw_dir', 'bdd_root', 'bdd100k_root', 'bdd_dataset_root',
         'raw_bdd_dir', 'raw_bdd_root'
@@ -80,6 +79,7 @@ def _raw_roots() -> List[str]:
         if isinstance(v, str) and v.strip():
             roots.append(v)
     roots += [
+        '/content/bdd100k_labels_unzipped',
         RAW_BDD_ROOT,
         os.path.join(ECOCAR_ROOT, 'datasets', 'bdd100k_raw'),
         os.path.join(ECOCAR_ROOT, 'datasets', 'bdd100k'),
@@ -105,32 +105,29 @@ def _labels_zip_candidates() -> List[str]:
 
 
 def ensure_bdd_labels_extracted(verbose: bool = False) -> str:
-    """Ensure official BDD labels zip is extracted to a usable raw root.
+    """Ensure per-image official labels zip is extracted.
 
-    Official old-format labels zip usually expands to:
-      bdd100k/labels/bdd100k_labels_images_train.json
-      bdd100k/labels/bdd100k_labels_images_val.json
-    as used by the official bdd2coco.py script.
+    The user's labels zip was verified to expand to per-image JSON files:
+      /content/bdd100k_labels_unzipped/100k/train/*.json
+      /content/bdd100k_labels_unzipped/100k/val/*.json
+    That is the primary source we use for lane poly2d labels.
     """
-    # If already extracted anywhere, use it.
+    preferred = '/content/bdd100k_labels_unzipped'
+    # If already extracted, use it immediately.
+    if os.path.isdir(os.path.join(preferred, '100k', 'train')):
+        return preferred
     for root in _raw_roots():
-        for rel in [
-            os.path.join('bdd100k', 'labels', 'bdd100k_labels_images_train.json'),
-            os.path.join('labels', 'bdd100k_labels_images_train.json'),
-            os.path.join('bdd100k', 'labels', 'lane', 'polygons', 'lane_train.json'),
-            os.path.join('labels', 'lane', 'polygons', 'lane_train.json'),
-        ]:
-            if os.path.isfile(os.path.join(root, rel)):
-                return root
+        if os.path.isdir(os.path.join(root, '100k', 'train')):
+            return root
 
     zip_path = next((p for p in _labels_zip_candidates() if os.path.isfile(p)), None)
-    target_root = RAW_BDD_ROOT
+    target_root = preferred
     if zip_path is None:
         return target_root
 
     os.makedirs(target_root, exist_ok=True)
     marker = os.path.join(target_root, '.bdd_labels_extracted')
-    if not os.path.isfile(marker):
+    if (not os.path.isdir(os.path.join(target_root, '100k', 'train'))) or (not os.path.isfile(marker)):
         if verbose:
             print(f'Extracting BDD labels zip: {zip_path} -> {target_root}')
         with zipfile.ZipFile(zip_path, 'r') as zf:
@@ -141,22 +138,24 @@ def ensure_bdd_labels_extracted(verbose: bool = False) -> str:
 
 
 def lane_json_candidates(split: str = 'train') -> List[str]:
-    """Return candidates in the same spirit as official BDD releases.
+    """Return candidate lane label sources.
 
-    Priority order:
-    1) old official consolidated labels JSON used by bdd2coco.py
-    2) new task-specific lane polygons JSON
+    Priority order is based on the user's verified labels zip structure:
+    1) per-image JSON directory: .../100k/train or .../100k/val
+    2) older consolidated JSONs, if present
+    3) task-specific lane polygons JSONs, if present
     """
     roots = [ensure_bdd_labels_extracted(False)] + _raw_roots()
     cands=[]
     for root in roots:
         cands.extend([
+            os.path.join(root, '100k', split),
+            os.path.join(root, 'bdd100k', '100k', split),
             os.path.join(root, 'bdd100k', 'labels', f'bdd100k_labels_images_{split}.json'),
             os.path.join(root, 'labels', f'bdd100k_labels_images_{split}.json'),
             os.path.join(root, 'bdd100k', 'labels', 'lane', 'polygons', f'lane_{split}.json'),
             os.path.join(root, 'labels', 'lane', 'polygons', f'lane_{split}.json'),
         ])
-    # unique preserve order
     out=[]
     seen=set()
     for p in cands:
@@ -167,9 +166,20 @@ def lane_json_candidates(split: str = 'train') -> List[str]:
     return out
 
 
+def _is_valid_lane_source(path: str) -> bool:
+    if os.path.isfile(path):
+        return True
+    if os.path.isdir(path):
+        try:
+            return any(name.lower().endswith('.json') for name in os.listdir(path))
+        except Exception:
+            return False
+    return False
+
+
 def find_lane_labels(split: str = 'train') -> Optional[str]:
     for path in lane_json_candidates(split):
-        if os.path.isfile(path):
+        if _is_valid_lane_source(path):
             return path
     return None
 
