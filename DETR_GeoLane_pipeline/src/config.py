@@ -21,7 +21,7 @@ TRAINING_RUNS    = os.path.join(ECOCAR_ROOT, "training_runs")
 OUTPUTS_DIR      = os.path.join(ECOCAR_ROOT, "outputs")
 VIDEO_DIR        = os.path.join(ECOCAR_ROOT, "video")
 DOWNLOADS_DIR    = os.path.join(ECOCAR_ROOT, "downloads")
-RAW_DATASET_ROOT = "/content/bdd100k_labels_unzipped"
+RAW_DATASET_ROOT = "/content/bdd100k_raw"
 PATHS_CONFIG     = os.path.join(ECOCAR_ROOT, "paths_config.yaml")
 
 # Local fast‑IO mirror (Colab local SSD — extracted from Drive tars)

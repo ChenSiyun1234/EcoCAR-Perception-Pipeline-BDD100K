@@ -1,12 +1,18 @@
-"""
-BDD100K poly2d -> structured lane targets.
 
-This parser is intentionally defensive:
-- supports per-image JSON directories like 100k/train/*.json
-- supports consolidated JSON files
-- supports official `labels`, old `frames/objects`, and unknown nested layouts
-- recursively searches for lane-like dicts that contain poly2d
-- expands BDD poly2d segments (L/C types) into dense point sequences
+"""
+BDD100K lane parser.
+
+Supports:
+- per-image directory labels, e.g. 100k/train/*.json and 100k/val/*.json
+- consolidated JSON files
+- official newer Scalabel-style records with top-level `labels`
+- official old-format per-image records with top-level `frames -> objects`
+- poly2d stored as dicts with vertices/types/closed
+- old poly2d stored as point arrays, including [x, y, "L"|"C"]
+
+Key rule:
+- for the user's downloaded `bdd100k_labels.zip`, treat the old per-image
+  JSON layout as the primary source of truth.
 """
 
 import json
@@ -38,23 +44,6 @@ def _as_list(v):
         return [str(x) for x in v if str(x).strip()]
     return [str(v)]
 
-def _iter_possible_labels(record: Any) -> Iterable[dict]:
-    if isinstance(record, dict):
-        if isinstance(record.get("labels"), list):
-            for x in record["labels"]:
-                if isinstance(x, dict):
-                    yield x
-        if isinstance(record.get("objects"), list):
-            for x in record["objects"]:
-                if isinstance(x, dict):
-                    yield x
-        frames = record.get("frames")
-        if isinstance(frames, list):
-            for fr in frames:
-                if isinstance(fr, dict):
-                    for x in _iter_possible_labels(fr):
-                        yield x
-
 def _record_image_name(record: dict, fallback_json_path: Optional[str] = None) -> str:
     for key in ["name", "image", "imageName", "filename", "id"]:
         v = record.get(key)
@@ -72,21 +61,31 @@ def _normalize_lane_category(label: dict) -> Optional[str]:
     attrs = label.get("attributes") or {}
 
     lane_types = []
-    for key in ["laneType", "laneTypes", "type", "types", "style", "styles", "lane_type"]:
+    for key in [
+        "laneTypes", "laneType", "lane_type",
+        "type", "types", "subtype", "subtypes"
+    ]:
         lane_types.extend(_as_list(attrs.get(key)))
-    if "subtype" in label:
-        lane_types.extend(_as_list(label.get("subtype")))
-    lane_types = [t.strip().lower() for t in lane_types if str(t).strip()]
+        if key in label:
+            lane_types.extend(_as_list(label.get(key)))
 
-    norm = None
+    # Older BDD format often has "category": "lane/road curb" directly.
     if cat.startswith("lane/"):
         norm = cat
     elif cat == "lane":
-        if lane_types:
-            norm = f"lane/{lane_types[0]}"
+        norm = None
+        # official new format: category is lane, subtype is in attributes.laneTypes
+        for t in lane_types:
+            tt = t.strip().lower()
+            if tt in KNOWN_LANE_SUBTYPES:
+                norm = f"lane/{tt}"
+                break
     elif cat in KNOWN_LANE_SUBTYPES:
         norm = f"lane/{cat}"
+    else:
+        norm = None
 
+    # Fallback keyword scan in category + attributes for messy records.
     if norm is None:
         text_bits = [cat]
         for _, v in attrs.items():
@@ -99,116 +98,219 @@ def _normalize_lane_category(label: dict) -> Optional[str]:
 
     return norm if norm in LANE_CAT_TO_ID else None
 
-def _normalize_poly2d_items(poly2d_field) -> List[dict]:
+def _iter_candidate_objects(record: Any) -> Iterable[dict]:
+    """Yield label/object dicts from both official BDD100K schemas."""
+    if not isinstance(record, dict):
+        return
+
+    # New Scalabel-style: top-level labels
+    labels = record.get("labels")
+    if isinstance(labels, list):
+        for lab in labels:
+            if isinstance(lab, dict):
+                yield lab
+
+    # Old style: top-level frames -> objects
+    frames = record.get("frames")
+    if isinstance(frames, list):
+        for fr in frames:
+            if not isinstance(fr, dict):
+                continue
+            objs = fr.get("objects")
+            if isinstance(objs, list):
+                for obj in objs:
+                    if isinstance(obj, dict):
+                        yield obj
+
+    # Some variants expose top-level objects directly
+    objs = record.get("objects")
+    if isinstance(objs, list):
+        for obj in objs:
+            if isinstance(obj, dict):
+                yield obj
+
+def _normalize_poly2d_items(poly2d_field) -> List[Any]:
+    """
+    Normalize poly2d/seg2d into a list of segment-like objects.
+    Supported cases:
+    - [{"vertices": ..., "types": ..., "closed": ...}, ...]
+    - [[x, y, "L"], [x, y, "C"], ...]              (one segment)
+    - [[[...], [...]], [[...], [...]]]            (many segments)
+    - {"vertices": ...}
+    """
     if poly2d_field is None:
         return []
+
     if isinstance(poly2d_field, dict):
         return [poly2d_field]
-    if not isinstance(poly2d_field, list):
-        return []
-    items = []
-    for item in poly2d_field:
-        if isinstance(item, dict):
-            items.append(item)
-        elif isinstance(item, (list, tuple)) and item and isinstance(item[0], (list, tuple)):
-            items.append({"vertices": item, "types": "L" * len(item), "closed": False})
-    return items
 
-def _coerce_vertices_and_types(poly: dict) -> Tuple[np.ndarray, str, bool]:
-    verts = poly.get("vertices") or []
-    types = poly.get("types") or ""
-    closed = bool(poly.get("closed", False))
-    out = []
+    if not isinstance(poly2d_field, list) or len(poly2d_field) == 0:
+        return []
+
+    first = poly2d_field[0]
+
+    # list of dict segments
+    if isinstance(first, dict):
+        return [x for x in poly2d_field if isinstance(x, dict)]
+
+    # one segment of points: [[x,y], [x,y], ...] or [[x,y,"L"], ...]
+    if isinstance(first, (list, tuple)):
+        if len(first) >= 2 and isinstance(first[0], (int, float)):
+            return [poly2d_field]
+
+        # many segments, each segment is a list of points
+        if len(first) > 0 and isinstance(first[0], (list, tuple, dict)):
+            return [seg for seg in poly2d_field if isinstance(seg, (list, tuple, dict))]
+
+    return []
+
+def _coerce_point(v):
+    if isinstance(v, dict):
+        if "x" in v and "y" in v:
+            try:
+                return float(v["x"]), float(v["y"]), str(v.get("type", v.get("types", "L")) or "L")[0]
+            except Exception:
+                return None
+        if "point" in v and isinstance(v["point"], (list, tuple)) and len(v["point"]) >= 2:
+            try:
+                return float(v["point"][0]), float(v["point"][1]), str(v.get("type", "L") or "L")[0]
+            except Exception:
+                return None
+
+    if isinstance(v, (list, tuple)) and len(v) >= 2:
+        try:
+            x = float(v[0])
+            y = float(v[1])
+        except Exception:
+            return None
+        t = "L"
+        if len(v) >= 3 and isinstance(v[2], str) and len(v[2]) > 0:
+            t = v[2][0]
+        return x, y, t
+
+    return None
+
+def _coerce_vertices_and_types(poly) -> Tuple[np.ndarray, str, bool]:
+    if isinstance(poly, dict):
+        verts = poly.get("vertices", []) or []
+        types = poly.get("types", "") or ""
+        closed = bool(poly.get("closed", False))
+    else:
+        # old format segment = list of points with embedded types
+        verts = poly
+        types = ""
+        closed = False
+
+    out_verts = []
     out_types = []
     for i, v in enumerate(verts):
-        if not isinstance(v, (list, tuple)) or len(v) < 2:
+        out = _coerce_point(v)
+        if out is None:
             continue
-        try:
-            x = float(v[0]); y = float(v[1])
-        except Exception:
-            continue
-        out.append([x, y])
-        typ = None
-        if len(v) >= 3 and isinstance(v[2], str) and v[2]:
-            typ = v[2][0]
-        elif isinstance(types, str) and i < len(types) and types[i]:
-            typ = types[i]
-        out_types.append(typ or "L")
-    pts = np.asarray(out, dtype=np.float64)
-    if pts.ndim != 2 or pts.shape[0] < 2:
-        return np.zeros((0, 2), dtype=np.float64), "", closed
-    return pts, "".join(out_types), closed
+        x, y, embedded_t = out
+        out_verts.append([x, y])
 
-def _sample_quad(p0, p1, p2, n=16):
-    t = np.linspace(0.0, 1.0, n)[:, None]
-    return (1 - t) ** 2 * p0 + 2 * (1 - t) * t * p1 + t ** 2 * p2
+        # embedded type wins; otherwise use poly["types"][i] if available
+        t = embedded_t
+        if embedded_t == "L" and i < len(types):
+            if isinstance(types[i], str) and len(types[i]) > 0:
+                t = types[i][0]
+        if t not in ("L", "C"):
+            t = "L"
+        out_types.append(t)
+
+    return np.asarray(out_verts, dtype=np.float64), "".join(out_types), closed
+
+def _sample_quad(p0, p1, p2, n=12):
+    ts = np.linspace(0.0, 1.0, int(max(2, n)))
+    return np.stack([
+        ((1 - t) ** 2) * p0 + 2 * (1 - t) * t * p1 + (t ** 2) * p2
+        for t in ts
+    ], axis=0)
 
 def _sample_cubic(p0, p1, p2, p3, n=20):
-    t = np.linspace(0.0, 1.0, n)[:, None]
-    return ((1 - t) ** 3 * p0 + 3 * (1 - t) ** 2 * t * p1 +
-            3 * (1 - t) * t ** 2 * p2 + t ** 3 * p3)
+    ts = np.linspace(0.0, 1.0, int(max(2, n)))
+    return np.stack([
+        ((1 - t) ** 3) * p0
+        + 3 * ((1 - t) ** 2) * t * p1
+        + 3 * (1 - t) * (t ** 2) * p2
+        + (t ** 3) * p3
+        for t in ts
+    ], axis=0)
 
-def _poly2d_segment_to_points(poly: dict, bezier_samples: int = 20) -> np.ndarray:
+def _segment_to_dense_points(poly, bezier_samples=20) -> np.ndarray:
     verts, types, closed = _coerce_vertices_and_types(poly)
     if len(verts) < 2:
         return np.zeros((0, 2), dtype=np.float64)
+
     dense = [verts[0].copy()]
     i = 1
     while i < len(verts):
         cur = dense[-1]
-        t = types[i] if i < len(types) else "L"
-        if t == "L":
+        ti = types[i] if i < len(types) else "L"
+
+        # straight line to next vertex
+        if ti == "L":
             dense.append(verts[i].copy())
             i += 1
             continue
-        if i + 2 < len(verts) and types[i] == "C" and types[i + 1] == "C" and types[i + 2] == "L":
-            pts = _sample_cubic(cur, verts[i], verts[i + 1], verts[i + 2], bezier_samples)
-            dense.extend(pts[1:])
-            i += 3
-            continue
-        if i + 1 < len(verts) and types[i] == "C" and types[i + 1] == "L":
-            pts = _sample_quad(cur, verts[i], verts[i + 1], max(8, bezier_samples // 2))
-            dense.extend(pts[1:])
-            i += 2
-            continue
+
+        # cubic: current -> C -> C -> L
+        if i + 2 < len(verts):
+            t0 = types[i] if i < len(types) else "L"
+            t1 = types[i + 1] if i + 1 < len(types) else "L"
+            t2 = types[i + 2] if i + 2 < len(types) else "L"
+            if t0 == "C" and t1 == "C" and t2 == "L":
+                pts = _sample_cubic(cur, verts[i], verts[i + 1], verts[i + 2], bezier_samples)
+                dense.extend(pts[1:])
+                i += 3
+                continue
+
+        # quadratic: current -> C -> L
+        if i + 1 < len(verts):
+            t0 = types[i] if i < len(types) else "L"
+            t1 = types[i + 1] if i + 1 < len(types) else "L"
+            if t0 == "C" and t1 == "L":
+                pts = _sample_quad(cur, verts[i], verts[i + 1], max(8, bezier_samples // 2))
+                dense.extend(pts[1:])
+                i += 2
+                continue
+
+        # fallback: treat control point as a normal vertex instead of discarding it
         dense.append(verts[i].copy())
         i += 1
-    if closed and len(dense) > 2 and np.linalg.norm(np.asarray(dense[0]) - np.asarray(dense[-1])) > 1e-6:
-        dense.append(np.asarray(dense[0]).copy())
+
+    if closed and len(dense) > 2:
+        if np.linalg.norm(np.asarray(dense[0]) - np.asarray(dense[-1])) > 1e-6:
+            dense.append(np.asarray(dense[0]).copy())
+
     pts = np.asarray(dense, dtype=np.float64)
+    # remove duplicates
     keep = [0]
-    for i in range(1, len(pts)):
-        if np.linalg.norm(pts[i] - pts[keep[-1]]) > 1e-6:
-            keep.append(i)
+    for j in range(1, len(pts)):
+        if np.linalg.norm(pts[j] - pts[keep[-1]]) > 1e-6:
+            keep.append(j)
     return pts[keep]
 
 def parse_poly2d(poly2d_field, bezier_samples: int = 20) -> List[np.ndarray]:
     out = []
-    for poly in _normalize_poly2d_items(poly2d_field):
-        pts = _poly2d_segment_to_points(poly, bezier_samples=bezier_samples)
+    for seg in _normalize_poly2d_items(poly2d_field):
+        pts = _segment_to_dense_points(seg, bezier_samples=bezier_samples)
         if len(pts) >= 2:
             out.append(pts)
     return out
 
-def _walk(obj, path="root"):
-    if isinstance(obj, dict):
-        yield path, obj
-        for k, v in obj.items():
-            yield from _walk(v, f"{path}.{k}")
-    elif isinstance(obj, list):
-        for i, v in enumerate(obj):
-            yield from _walk(v, f"{path}[{i}]")
-
 def extract_lane_labels_any(record: dict) -> List[dict]:
+    """Return lane-like objects that actually contain geometric data."""
     labels = []
-    for lab in _iter_possible_labels(record):
-        if isinstance(lab, dict) and lab.get("poly2d") is not None:
+    for lab in _iter_candidate_objects(record):
+        if not isinstance(lab, dict):
+            continue
+        if _normalize_lane_category(lab) is None:
+            continue
+        if lab.get("poly2d") is not None or lab.get("seg2d") is not None:
             labels.append(lab)
-    if not labels:
-        for _, node in _walk(record):
-            if isinstance(node, dict) and node.get("poly2d") is not None:
-                labels.append(node)
-    return [lab for lab in labels if _normalize_lane_category(lab) is not None]
+    return labels
 
 def resample_polyline(pts: np.ndarray, n: int) -> Tuple[np.ndarray, np.ndarray]:
     if pts[-1, 1] < pts[0, 1]:
@@ -232,8 +334,10 @@ def resample_polyline(pts: np.ndarray, n: int) -> Tuple[np.ndarray, np.ndarray]:
         else:
             t = (d - seg_start) / seg_len
             resampled[i] = pts[idx] * (1 - t) + pts[idx + 1] * t
-    visibility = ((resampled[:, 0] >= 0.0) & (resampled[:, 0] <= BDD_IMG_W - 1) &
-                  (resampled[:, 1] >= 0.0) & (resampled[:, 1] <= BDD_IMG_H - 1))
+    visibility = (
+        (resampled[:, 0] >= 0.0) & (resampled[:, 0] <= BDD_IMG_W - 1) &
+        (resampled[:, 1] >= 0.0) & (resampled[:, 1] <= BDD_IMG_H - 1)
+    )
     return resampled, visibility
 
 def frame_to_lane_targets(labels: List[dict], max_lanes: int = 10,
@@ -244,12 +348,18 @@ def frame_to_lane_targets(labels: List[dict], max_lanes: int = 10,
     points = np.zeros((max_lanes, num_points, 2), dtype=np.float32)
     visibility = np.zeros((max_lanes, num_points), dtype=np.float32)
     lane_type = np.zeros(max_lanes, dtype=np.int64)
+
     lane_items: List[Tuple[str, np.ndarray]] = []
     for label in labels:
         norm_cat = _normalize_lane_category(label)
         if norm_cat is None:
             continue
-        for pl in parse_poly2d(label.get("poly2d")):
+
+        geom_field = label.get("poly2d")
+        if geom_field is None and label.get("seg2d") is not None:
+            geom_field = label.get("seg2d")
+
+        for pl in parse_poly2d(geom_field):
             if len(pl) < 2:
                 continue
             span_y = float(pl[:, 1].max() - pl[:, 1].min())
@@ -257,7 +367,15 @@ def frame_to_lane_targets(labels: List[dict], max_lanes: int = 10,
             if arc < 2.0 or span_y < 1.0:
                 continue
             lane_items.append((norm_cat, pl))
-    lane_items.sort(key=lambda x: ((x[1][:, 1].max() - x[1][:, 1].min()), np.sqrt(((np.diff(x[1], axis=0)) ** 2).sum(axis=1)).sum()), reverse=True)
+
+    lane_items.sort(
+        key=lambda x: (
+            float(x[1][:, 1].max() - x[1][:, 1].min()),
+            float(np.sqrt(((np.diff(x[1], axis=0)) ** 2).sum(axis=1)).sum())
+        ),
+        reverse=True
+    )
+
     lane_idx = 0
     for norm_cat, pl in lane_items:
         if lane_idx >= max_lanes:
@@ -271,7 +389,13 @@ def frame_to_lane_targets(labels: List[dict], max_lanes: int = 10,
         visibility[lane_idx] = vis.astype(np.float32)
         lane_type[lane_idx] = LANE_CAT_TO_ID[norm_cat]
         lane_idx += 1
-    return {"existence": existence, "points": points, "visibility": visibility, "lane_type": lane_type}
+
+    return {
+        "existence": existence,
+        "points": points,
+        "visibility": visibility,
+        "lane_type": lane_type,
+    }
 
 def inspect_json_for_lanes(source_path: str, limit: int = 3) -> List[dict]:
     samples = []
@@ -283,19 +407,33 @@ def inspect_json_for_lanes(source_path: str, limit: int = 3) -> List[dict]:
         except Exception as e:
             samples.append({"path": p, "error": str(e)})
             continue
+
         rec = data[0] if isinstance(data, list) and data else data
         labels = extract_lane_labels_any(rec) if isinstance(rec, dict) else []
-        sample = {"path": p, "top_type": type(data).__name__, "record_keys": list(rec.keys())[:20] if isinstance(rec, dict) else None, "num_lane_like": len(labels)}
+        sample = {
+            "path": p,
+            "top_type": type(data).__name__,
+            "record_keys": list(rec.keys())[:20] if isinstance(rec, dict) else None,
+            "num_lane_like": len(labels),
+        }
         if labels:
             lab = labels[0]
             sample["first_category"] = lab.get("category")
             sample["first_attr_keys"] = list((lab.get("attributes") or {}).keys())
-            polys = _normalize_poly2d_items(lab.get("poly2d"))
+            geom_field = lab.get("poly2d")
+            if geom_field is None and lab.get("seg2d") is not None:
+                geom_field = lab.get("seg2d")
+                sample["used_seg2d"] = True
+            polys = _normalize_poly2d_items(geom_field)
+            sample["num_polys"] = len(polys)
             if polys:
                 verts, types, closed = _coerce_vertices_and_types(polys[0])
                 sample["first_vertices_head"] = verts[:5].tolist() if len(verts) else []
                 sample["first_types"] = types[:20]
                 sample["closed"] = closed
+                dense = _segment_to_dense_points(polys[0], 12)
+                sample["dense_points_head"] = dense[:5].tolist() if len(dense) else []
+                sample["dense_len"] = int(len(dense))
         samples.append(sample)
     return samples
 
@@ -320,13 +458,18 @@ class LaneLabelCache:
         name = _record_image_name(record, fallback_path)
         if not name or not labels:
             return
+
         targets = frame_to_lane_targets(labels, self.max_lanes, self.num_points)
         if float(targets["existence"].sum()) > 0:
             self._cache[name] = labels
             if len(self._debug_samples) < 3:
                 first = labels[0]
-                polys = _normalize_poly2d_items(first.get("poly2d"))
+                geom_field = first.get("poly2d")
+                if geom_field is None and first.get("seg2d") is not None:
+                    geom_field = first.get("seg2d")
+                polys = _normalize_poly2d_items(geom_field)
                 verts, types, _ = _coerce_vertices_and_types(polys[0]) if polys else (np.zeros((0, 2)), "", False)
+                dense = _segment_to_dense_points(polys[0], 12) if polys else np.zeros((0, 2))
                 self._debug_samples.append({
                     "name": name,
                     "n_labels": len(labels),
@@ -334,6 +477,8 @@ class LaneLabelCache:
                     "first_category": first.get("category"),
                     "first_vertices_head": verts[:5].tolist() if len(verts) else [],
                     "first_types": types[:20],
+                    "dense_points_head": dense[:5].tolist() if len(dense) else [],
+                    "dense_len": int(len(dense)),
                 })
 
     def _load_from_directory(self, dir_path: str):
