@@ -39,12 +39,50 @@ def parse_poly2d(poly2d_field) -> List[np.ndarray]:
 def _maybe_prefix_lane_category(cat: str) -> str:
     if not cat:
         return ""
-    cat = str(cat)
+    cat = str(cat).strip()
     if cat.startswith("lane/"):
         return cat
-    if cat in [c.split("/", 1)[1] for c in LANE_TRAIN_CATS]:
+    short = [c.split("/", 1)[1] for c in LANE_TRAIN_CATS]
+    if cat in short:
         return "lane/" + cat
     return cat
+
+
+def _lane_cat_from_attrs(cat: str, attrs: dict) -> str:
+    """Infer canonical lane category from BDD100K official attributes.
+
+    Official docs say lane markings use category='lane' and lane subtype lives in
+    attributes['laneTypes'] in the newer format. Older / variant exports may use
+    laneType, type, or already-expanded lane/<subtype> strings.
+    """
+    cat = _maybe_prefix_lane_category(cat)
+    attrs = attrs or {}
+    if cat.startswith("lane/"):
+        return cat
+    if cat != "lane":
+        return cat
+
+    candidates = []
+    for key in ["laneTypes", "laneType", "type", "types"]:
+        val = attrs.get(key)
+        if isinstance(val, str) and val.strip():
+            candidates.append(val.strip())
+        elif isinstance(val, (list, tuple)):
+            for v in val:
+                if isinstance(v, str) and v.strip():
+                    candidates.append(v.strip())
+    for cand in candidates:
+        norm = _maybe_prefix_lane_category(cand)
+        if norm in LANE_CAT_TO_ID:
+            return norm
+
+    # Last-resort heuristic for older exports where lane subtype may be split.
+    style = str(attrs.get("laneStyle", attrs.get("style", "")) or "").strip().lower()
+    color = str(attrs.get("laneColor", attrs.get("color", "other")) or "other").strip().lower()
+    if style in {"solid", "dashed"}:
+        if color in {"white", "yellow", "other"}:
+            return f"lane/single {color}"
+    return "lane"
 
 def _extract_lane_labels_from_record(record: dict) -> Tuple[str, List[dict]]:
     """
@@ -65,7 +103,8 @@ def _extract_lane_labels_from_record(record: dict) -> Tuple[str, List[dict]]:
         for lab in labels:
             if not isinstance(lab, dict):
                 continue
-            cat = _maybe_prefix_lane_category(lab.get("category", ""))
+            attrs = lab.get("attributes") or {}
+            cat = _lane_cat_from_attrs(lab.get("category", ""), attrs)
             poly2d = lab.get("poly2d")
             if poly2d and cat.startswith("lane/"):
                 lane_labels.append({
@@ -87,13 +126,8 @@ def _extract_lane_labels_from_record(record: dict) -> Tuple[str, List[dict]]:
             for obj in objs:
                 if not isinstance(obj, dict):
                     continue
-                cat = _maybe_prefix_lane_category(obj.get("category", ""))
-                # old format may store category='lane' with attributes
                 attrs = obj.get("attributes") or {}
-                if cat == "lane":
-                    lane_type = attrs.get("laneType")
-                    if isinstance(lane_type, str) and lane_type:
-                        cat = f"lane/{lane_type}"
+                cat = _lane_cat_from_attrs(obj.get("category", ""), attrs)
                 poly2d = obj.get("poly2d")
                 if poly2d and cat.startswith("lane/"):
                     lane_labels.append({
@@ -107,12 +141,8 @@ def _extract_lane_labels_from_record(record: dict) -> Tuple[str, List[dict]]:
         for obj in objs:
             if not isinstance(obj, dict):
                 continue
-            cat = _maybe_prefix_lane_category(obj.get("category", ""))
             attrs = obj.get("attributes") or {}
-            if cat == "lane":
-                lane_type = attrs.get("laneType")
-                if isinstance(lane_type, str) and lane_type:
-                    cat = f"lane/{lane_type}"
+            cat = _lane_cat_from_attrs(obj.get("category", ""), attrs)
             poly2d = obj.get("poly2d")
             if poly2d and cat.startswith("lane/"):
                 lane_labels.append({
@@ -236,6 +266,37 @@ class LaneLabelCache:
                 if file_cached:
                     count += 1
             print(f"  Cached lane labels for {len(self._cache)} frames")
+            if len(self._cache) == 0:
+                # Print one lightweight diagnostic from the first json file.
+                for name in sorted(os.listdir(source_path)):
+                    if not name.lower().endswith('.json'):
+                        continue
+                    try:
+                        with open(os.path.join(source_path, name), 'r') as f:
+                            sample = json.load(f)
+                        rec = sample[0] if isinstance(sample, list) and sample else sample
+                        print(f"  Example lane-json file: {name}")
+                        if isinstance(rec, dict):
+                            print(f"  Top-level keys: {list(rec.keys())[:12]}")
+                            labs = rec.get('labels')
+                            if isinstance(labs, list) and labs:
+                                ex = labs[0]
+                                print(f"  First label category: {ex.get('category')}")
+                                print(f"  First label attr keys: {list((ex.get('attributes') or {}).keys())}")
+                                print(f"  First label has poly2d: {'poly2d' in ex}")
+                            frames = rec.get('frames')
+                            if isinstance(frames, list) and frames:
+                                fr0 = frames[0]
+                                objs = fr0.get('objects') or fr0.get('labels') or []
+                                print(f"  First frame keys: {list(fr0.keys())[:12]}")
+                                if objs:
+                                    ex = objs[0]
+                                    print(f"  First object category: {ex.get('category')}")
+                                    print(f"  First object attr keys: {list((ex.get('attributes') or {}).keys())}")
+                                    print(f"  First object has poly2d: {'poly2d' in ex}")
+                        break
+                    except Exception:
+                        continue
             return
 
         if os.path.isfile(source_path):
