@@ -76,9 +76,10 @@ class BDD100KDualDataset(Dataset):
         img = cv2.resize(img, (self.img_size, self.img_size))
 
         # Augmentation (simple)
-        do_flip = bool(self.augment and (np.random.rand() < 0.5))
-        if do_flip:
-            img = img[:, ::-1, :].copy()  # horizontal flip
+        if self.augment:
+            if np.random.rand() < 0.5:
+                img = img[:, ::-1, :].copy()  # horizontal flip
+                # Will need to flip labels too — handled below
 
         img_tensor = torch.from_numpy(img.astype(np.float32) / 255.0).permute(2, 0, 1)
 
@@ -105,9 +106,12 @@ class BDD100KDualDataset(Dataset):
             has_lanes = True
 
         # ── Apply augmentation to labels ──────────────────────────────
-        if do_flip:
+        if self.augment and np.random.rand() < 0.5:
+            # (was flipped above)
+            # Flip detection boxes
             if det_targets.shape[0] > 0:
                 det_targets[:, 1] = 1.0 - det_targets[:, 1]  # cx = 1 - cx
+            # Flip lane points
             if has_lanes:
                 lane_targets["points"][:, :, 0] = 1.0 - lane_targets["points"][:, :, 0]
 

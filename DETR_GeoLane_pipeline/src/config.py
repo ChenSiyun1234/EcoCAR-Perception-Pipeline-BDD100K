@@ -1,17 +1,16 @@
-
 """
 Centralized path conventions and default configuration.
 
 All Google Drive paths are defined here so the rest of the codebase
-never hardcodes a Drive path.  On Colab the Drive is mounted at
+never hardcodes a Drive path. On Colab the Drive is mounted at
 /content/drive/MyDrive; locally the paths are unused.
 """
 
 import os
 import yaml
 import zipfile
-from dataclasses import dataclass, field, asdict
-from typing import List, Optional, Tuple
+from dataclasses import dataclass, asdict
+from typing import List, Optional, Dict
 
 # ── Drive path constants (match the existing EcoCAR layout) ──────────
 ECOCAR_ROOT      = "/content/drive/MyDrive/EcoCAR"
@@ -21,11 +20,11 @@ TRAINING_RUNS    = os.path.join(ECOCAR_ROOT, "training_runs")
 OUTPUTS_DIR      = os.path.join(ECOCAR_ROOT, "outputs")
 VIDEO_DIR        = os.path.join(ECOCAR_ROOT, "video")
 DOWNLOADS_DIR    = os.path.join(ECOCAR_ROOT, "downloads")
-RAW_DATASET_ROOT = os.path.join(ECOCAR_ROOT, "datasets", "bdd100k_raw")
-PATHS_CONFIG     = os.path.join(ECOCAR_ROOT, "paths_config.yaml")
+PATHS_CONFIG_YAML = os.path.join(ECOCAR_ROOT, "paths_config.yaml")
 
 # Local fast‑IO mirror (Colab local SSD — extracted from Drive tars)
 LOCAL_DATASET     = "/content/bdd100k_yolo"
+RAW_BDD_ROOT      = "/content/bdd100k_raw"
 
 # BDD100K original image size
 BDD_IMG_W, BDD_IMG_H = 1280, 720
@@ -33,7 +32,6 @@ BDD_IMG_W, BDD_IMG_H = 1280, 720
 # ── Vehicle detection classes ────────────────────────────────────────
 VEHICLE_CLASSES = ["car", "truck", "bus", "motorcycle", "bicycle"]
 NUM_CLASSES = len(VEHICLE_CLASSES)
-
 BDD_FULL_CLASSES = [
     "person", "rider", "car", "truck", "bus",
     "train", "motorcycle", "bicycle", "traffic light", "traffic sign",
@@ -58,10 +56,139 @@ NUM_LANE_TYPES = len(LANE_TRAIN_CATS)
 LANE_CAT_TO_ID = {c: i for i, c in enumerate(LANE_TRAIN_CATS)}
 
 
+def _safe_load_paths_yaml() -> Dict:
+    if os.path.isfile(PATHS_CONFIG_YAML):
+        try:
+            with open(PATHS_CONFIG_YAML, 'r') as f:
+                data = yaml.safe_load(f) or {}
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _raw_roots() -> List[str]:
+    """Candidate extraction roots for raw BDD labels/images."""
+    y = _safe_load_paths_yaml()
+    roots = []
+    # notebook02/07 style custom raw roots, if present
+    for k in [
+        'bdd_raw_dir', 'bdd_root', 'bdd100k_root', 'bdd_dataset_root',
+        'raw_bdd_dir', 'raw_bdd_root'
+    ]:
+        v = y.get(k)
+        if isinstance(v, str) and v.strip():
+            roots.append(v)
+    roots += [
+        RAW_BDD_ROOT,
+        os.path.join(ECOCAR_ROOT, 'datasets', 'bdd100k_raw'),
+        os.path.join(ECOCAR_ROOT, 'datasets', 'bdd100k'),
+        os.path.join(DOWNLOADS_DIR, 'bdd100k'),
+        DOWNLOADS_DIR,
+    ]
+    out=[]
+    seen=set()
+    for r in roots:
+        r=os.path.normpath(r)
+        if r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
+
+
+def _labels_zip_candidates() -> List[str]:
+    return [
+        os.path.join(DOWNLOADS_DIR, 'bdd100k_labels.zip'),
+        os.path.join(ECOCAR_ROOT, 'datasets', 'bdd100k_labels.zip'),
+        os.path.join(ECOCAR_ROOT, 'downloads', 'labels.zip'),
+    ]
+
+
+def ensure_bdd_labels_extracted(verbose: bool = False) -> str:
+    """Ensure official BDD labels zip is extracted to a usable raw root.
+
+    Official old-format labels zip usually expands to:
+      bdd100k/labels/bdd100k_labels_images_train.json
+      bdd100k/labels/bdd100k_labels_images_val.json
+    as used by the official bdd2coco.py script.
+    """
+    # If already extracted anywhere, use it.
+    for root in _raw_roots():
+        for rel in [
+            os.path.join('bdd100k', 'labels', 'bdd100k_labels_images_train.json'),
+            os.path.join('labels', 'bdd100k_labels_images_train.json'),
+            os.path.join('bdd100k', 'labels', 'lane', 'polygons', 'lane_train.json'),
+            os.path.join('labels', 'lane', 'polygons', 'lane_train.json'),
+        ]:
+            if os.path.isfile(os.path.join(root, rel)):
+                return root
+
+    zip_path = next((p for p in _labels_zip_candidates() if os.path.isfile(p)), None)
+    target_root = RAW_BDD_ROOT
+    if zip_path is None:
+        return target_root
+
+    os.makedirs(target_root, exist_ok=True)
+    marker = os.path.join(target_root, '.bdd_labels_extracted')
+    if not os.path.isfile(marker):
+        if verbose:
+            print(f'Extracting BDD labels zip: {zip_path} -> {target_root}')
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            zf.extractall(target_root)
+        with open(marker, 'w') as f:
+            f.write(zip_path)
+    return target_root
+
+
+def lane_json_candidates(split: str = 'train') -> List[str]:
+    """Return candidates in the same spirit as official BDD releases.
+
+    Priority order:
+    1) old official consolidated labels JSON used by bdd2coco.py
+    2) new task-specific lane polygons JSON
+    """
+    roots = [ensure_bdd_labels_extracted(False)] + _raw_roots()
+    cands=[]
+    for root in roots:
+        cands.extend([
+            os.path.join(root, 'bdd100k', 'labels', f'bdd100k_labels_images_{split}.json'),
+            os.path.join(root, 'labels', f'bdd100k_labels_images_{split}.json'),
+            os.path.join(root, 'bdd100k', 'labels', 'lane', 'polygons', f'lane_{split}.json'),
+            os.path.join(root, 'labels', 'lane', 'polygons', f'lane_{split}.json'),
+        ])
+    # unique preserve order
+    out=[]
+    seen=set()
+    for p in cands:
+        p=os.path.normpath(p)
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def find_lane_labels(split: str = 'train') -> Optional[str]:
+    for path in lane_json_candidates(split):
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def lane_search_debug(split: str = 'train') -> Dict[str, object]:
+    raw_root = ensure_bdd_labels_extracted(verbose=False)
+    return {
+        'paths_config_yaml': PATHS_CONFIG_YAML,
+        'zip_candidates': _labels_zip_candidates(),
+        'raw_root': raw_root,
+        'candidates': lane_json_candidates(split),
+        'chosen': find_lane_labels(split),
+    }
+
+# ── Default training config ─────────────────────────────────────────
 @dataclass
 class Config:
-    run_name: str = "dualpath_v1"
-    device: str = "cuda"
+    run_name: str = 'dualpath_v1'
+    device: str = 'cuda'
     amp: bool = True
     seed: int = 42
     dataset_root: str = LOCAL_DATASET
@@ -71,7 +198,7 @@ class Config:
     max_lanes: int = 10
     lane_points: int = 72
     use_expanded_classes: bool = False
-    backbone: str = "resnet50"
+    backbone: str = 'resnet50'
     pretrained: bool = True
     fpn_channels: int = 256
     det_num_queries: int = 100
@@ -107,7 +234,7 @@ class Config:
     conf_thresh: float = 0.3
     nms_iou: float = 0.5
     lane_match_thresh: float = 15.0
-    save_dir: str = ""
+    save_dir: str = ''
     patience: int = 15
 
     def __post_init__(self):
@@ -119,99 +246,20 @@ class Config:
 
     def save(self, path: str):
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
+        with open(path, 'w') as f:
             yaml.dump(self.to_dict(), f, default_flow_style=False)
 
     @classmethod
-    def from_yaml(cls, path: str) -> "Config":
+    def from_yaml(cls, path: str) -> 'Config':
         with open(path) as f:
             d = yaml.safe_load(f)
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Config":
+    def from_dict(cls, d: dict) -> 'Config':
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
-def _read_paths_config_for_raw_dir() -> Optional[str]:
-    if not os.path.isfile(PATHS_CONFIG):
-        return None
-    try:
-        with open(PATHS_CONFIG, "r") as f:
-            data = yaml.safe_load(f) or {}
-        if isinstance(data, dict):
-            for k in ["bdd_raw_dir", "bdd100k_raw", "bdd_root", "bdd100k_root", "raw_bdd100k_dir"]:
-                v = data.get(k)
-                if isinstance(v, str) and v.strip():
-                    return v
-    except Exception:
-        return None
-    return None
-
-
-def ensure_bdd_labels_unzipped(force: bool = False) -> Tuple[Optional[str], list]:
-    """
-    Make sure bdd100k_labels.zip from Drive downloads is extracted.
-
-    Returns:
-        raw_root: extracted directory candidate or None
-        tried: list of checked paths
-    """
-    tried = []
-    raw_root = _read_paths_config_for_raw_dir() or RAW_DATASET_ROOT
-    candidate_zips = [
-        os.path.join(DOWNLOADS_DIR, "bdd100k_labels.zip"),
-        os.path.join(ECOCAR_ROOT, "downloads", "bdd100k_labels.zip"),
-    ]
-    for zpath in candidate_zips:
-        tried.append(zpath)
-        if os.path.isfile(zpath):
-            stamp = os.path.join(raw_root, ".labels_unzipped")
-            if force or not os.path.exists(stamp):
-                os.makedirs(raw_root, exist_ok=True)
-                with zipfile.ZipFile(zpath, "r") as zf:
-                    zf.extractall(raw_root)
-                with open(stamp, "w") as f:
-                    f.write("ok\n")
-            return raw_root, tried
-    return None, tried
-
-
-def get_lane_label_candidates(split: str = "train") -> list:
-    raw_root = _read_paths_config_for_raw_dir() or RAW_DATASET_ROOT
-    cands = [
-        os.path.join(raw_root, "bdd100k", "labels", "lane", "polygons", f"lane_{split}.json"),
-        os.path.join(raw_root, "labels", "lane", "polygons", f"lane_{split}.json"),
-        os.path.join(DOWNLOADS_DIR, "bdd100k", "labels", "lane", "polygons", f"lane_{split}.json"),
-        os.path.join(DOWNLOADS_DIR, "labels", "lane", "polygons", f"lane_{split}.json"),
-        os.path.join(raw_root, "bdd100k", "labels", f"bdd100k_labels_images_{split}.json"),
-        os.path.join(raw_root, "labels", f"bdd100k_labels_images_{split}.json"),
-    ]
-    # de-dup preserve order
-    seen = set()
-    out = []
-    for p in cands:
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
-    return out
-
-
-def find_lane_labels(split: str = "train", auto_extract: bool = True, return_tried: bool = False):
-    tried = []
-    if auto_extract:
-        _, tried_zip = ensure_bdd_labels_unzipped(force=False)
-        tried.extend(tried_zip)
-
-    candidates = get_lane_label_candidates(split)
-    tried.extend(candidates)
-    for path in candidates:
-        if os.path.isfile(path):
-            return (path, tried) if return_tried else path
-    return (None, tried) if return_tried else None
-
-
 def ensure_dirs(cfg: Config):
-    for d in [cfg.save_dir, os.path.join(cfg.save_dir, "weights"),
-              WEIGHTS_DIR, OUTPUTS_DIR]:
+    for d in [cfg.save_dir, os.path.join(cfg.save_dir, 'weights'), WEIGHTS_DIR, OUTPUTS_DIR]:
         os.makedirs(d, exist_ok=True)
