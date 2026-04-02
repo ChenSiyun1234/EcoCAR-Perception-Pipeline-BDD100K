@@ -11,37 +11,30 @@ import yaml
 from dataclasses import dataclass, asdict
 from typing import Optional
 
-# ── Drive path constants (match the existing EcoCAR layout) ──────────
 ECOCAR_ROOT      = "/content/drive/MyDrive/EcoCAR"
 DATASET_ROOT     = os.path.join(ECOCAR_ROOT, "datasets", "bdd100k_yolo")
 WEIGHTS_DIR      = os.path.join(ECOCAR_ROOT, "weights")
 TRAINING_RUNS    = os.path.join(ECOCAR_ROOT, "training_runs")
 OUTPUTS_DIR      = os.path.join(ECOCAR_ROOT, "outputs")
 VIDEO_DIR        = os.path.join(ECOCAR_ROOT, "video")
-PATHS_CONFIG     = os.path.join(ECOCAR_ROOT, "paths_config.yaml")
-BDD_RAW_DIR      = os.path.join(ECOCAR_ROOT, "datasets", "bdd100k_raw")
 
-# Local fast‑IO mirror (Colab local SSD — extracted from Drive tars)
-LOCAL_DATASET = "/content/bdd100k_yolo"
+LOCAL_DATASET    = "/content/bdd100k_yolo"
 
-# ── BDD100K annotation search paths (must include old YOLO26 conventions) ───────
 BDD_LABEL_SEARCH = [
-    os.path.join(BDD_RAW_DIR, "labels"),
-    os.path.join(BDD_RAW_DIR, "bdd100k", "labels"),
+    os.path.join(ECOCAR_ROOT, "datasets", "bdd100k_raw", "bdd100k", "labels"),
+    os.path.join(ECOCAR_ROOT, "datasets", "bdd100k_raw", "labels"),
     os.path.join(ECOCAR_ROOT, "datasets", "bdd100k", "labels"),
     os.path.join(ECOCAR_ROOT, "datasets", "bdd100k_labels"),
     os.path.join(ECOCAR_ROOT, "datasets"),
-    "/content/bdd100k_raw/labels",
-    "/content/bdd100k_raw/bdd100k/labels",
+    os.path.join(ECOCAR_ROOT, "project"),
     "/content/bdd100k/labels",
 ]
 
-# BDD100K original image size
 BDD_IMG_W, BDD_IMG_H = 1280, 720
 
-# ── Vehicle detection classes ────────────────────────────────────────
 VEHICLE_CLASSES = ["car", "truck", "bus", "motorcycle", "bicycle"]
 NUM_CLASSES = len(VEHICLE_CLASSES)
+
 BDD_FULL_CLASSES = [
     "person", "rider", "car", "truck", "bus",
     "train", "motorcycle", "bicycle", "traffic light", "traffic sign",
@@ -50,7 +43,6 @@ BDD_TO_VEHICLE = {2: 0, 3: 1, 4: 2, 6: 3, 7: 4}
 EXPANDED_CLASSES = ["car", "truck", "bus", "train", "motorcycle", "bicycle", "rider"]
 BDD_TO_EXPANDED = {2: 0, 3: 1, 4: 2, 5: 3, 6: 4, 7: 5, 1: 6}
 
-# ── Lane categories from BDD100K ────────────────────────────────────
 LANE_CATEGORIES = [
     "lane/single white",
     "lane/single yellow",
@@ -72,7 +64,6 @@ class Config:
     device: str = "cuda"
     amp: bool = True
     seed: int = 42
-
     dataset_root: str = LOCAL_DATASET
     img_size: int = 640
     batch_size: int = 8
@@ -80,11 +71,9 @@ class Config:
     max_lanes: int = 10
     lane_points: int = 72
     use_expanded_classes: bool = False
-
     backbone: str = "resnet50"
     pretrained: bool = True
     fpn_channels: int = 256
-
     det_num_queries: int = 100
     det_enc_layers: int = 1
     det_dec_layers: int = 3
@@ -92,7 +81,6 @@ class Config:
     det_nhead: int = 8
     det_ffn_dim: int = 1024
     det_dropout: float = 0.0
-
     lane_num_queries: int = 10
     lane_enc_layers: int = 1
     lane_dec_layers: int = 3
@@ -100,17 +88,14 @@ class Config:
     lane_nhead: int = 8
     lane_ffn_dim: int = 1024
     lane_dropout: float = 0.0
-
     cross_attn: bool = True
     cross_attn_layers: int = 1
-
     lr: float = 1e-4
     backbone_lr_scale: float = 0.1
     weight_decay: float = 1e-4
     epochs: int = 50
     warmup_epochs: int = 5
     min_lr_ratio: float = 0.01
-
     det_cls_weight: float = 2.0
     det_l1_weight: float = 5.0
     det_giou_weight: float = 2.0
@@ -119,11 +104,9 @@ class Config:
     lane_type_weight: float = 1.0
     det_task_weight: float = 1.0
     lane_task_weight: float = 1.0
-
     conf_thresh: float = 0.3
     nms_iou: float = 0.5
     lane_match_thresh: float = 15.0
-
     save_dir: str = ""
     patience: int = 15
 
@@ -150,119 +133,69 @@ class Config:
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
-def _from_paths_config(split: str) -> Optional[str]:
-    """Mirror the old YOLO26 notebook2 behavior: read paths_config.yaml if present.
-
-    The old notebook accepted *any* JSON path whose key suggested train/val,
-    even if the basename was not exactly the canonical consolidated filename.
-    """
-    if not os.path.isfile(PATHS_CONFIG):
-        return None
-    try:
-        with open(PATHS_CONFIG, 'r') as f:
-            pcfg = yaml.safe_load(f) or {}
-    except Exception:
-        return None
-
-    for key, val in pcfg.items():
-        if not isinstance(val, str) or not val.endswith('.json') or not os.path.isfile(val):
+def _paths_from_yaml(split: str) -> Optional[str]:
+    yaml_candidates = [
+        os.path.join(ECOCAR_ROOT, "paths_config.yaml"),
+        os.path.join(ECOCAR_ROOT, "project", "paths_config.yaml"),
+        os.path.join(ECOCAR_ROOT, "datasets", "paths_config.yaml"),
+    ]
+    for yp in yaml_candidates:
+        if not os.path.isfile(yp):
             continue
-        key_l = str(key).lower()
-        val_l = val.lower()
-        base = os.path.basename(val_l)
-        if split in key_l or split in base or f'images_{split}' in val_l:
-            return val
+        try:
+            with open(yp, "r") as f:
+                data = yaml.safe_load(f) or {}
+        except Exception:
+            continue
+        flat = {}
+        def walk(prefix, obj):
+            if isinstance(obj, dict):
+                for k, v in obj.items():
+                    walk(prefix + [str(k)], v)
+            else:
+                flat[".".join(prefix)] = obj
+        walk([], data)
+        for k, v in flat.items():
+            if not isinstance(v, str):
+                continue
+            kl = k.lower()
+            vl = v.lower()
+            if split in kl and "json" in kl and ("lane" in kl or "label" in kl) and os.path.isfile(v):
+                return v
+            if split in vl and vl.endswith(".json") and os.path.isfile(v):
+                base = os.path.basename(vl)
+                if "lane" in base or "bdd100k_labels_images" in base:
+                    return v
     return None
 
 
-def candidate_lane_label_paths(split: str = "train") -> list[str]:
-    """Return ordered candidate JSON paths, following old notebook2 logic first.
+def find_lane_labels(split: str = "train") -> Optional[str]:
+    from_yaml = _paths_from_yaml(split)
+    if from_yaml:
+        return from_yaml
 
-    Search order:
-      1) paths_config.yaml references
-      2) canonical direct paths under bdd100k_raw/labels and similar
-      3) recursive search under EcoCAR datasets for filenames containing the split
-    """
-    split = split.lower().strip()
-    candidates: list[str] = []
-
-    from_cfg = _from_paths_config(split)
-    if from_cfg:
-        candidates.append(from_cfg)
-
-    direct_names = [
+    explicit_candidates = [
         f"bdd100k_labels_images_{split}.json",
-        f"bdd100k_labels_{split}.json",
-        f"bdd100k_lane_marks_{split}.json",
         f"lane_{split}.json",
-        f"det_{split}.json",
+        os.path.join("lane", "polygons", f"lane_{split}.json"),
+        os.path.join("bdd100k", "labels", "lane", "polygons", f"lane_{split}.json"),
+        os.path.join("bdd100k", "labels", f"bdd100k_labels_images_{split}.json"),
     ]
     for base in BDD_LABEL_SEARCH:
-        for name in direct_names:
-            path = os.path.join(base, name)
-            if os.path.isfile(path) and path not in candidates:
-                candidates.append(path)
+        for cand in explicit_candidates:
+            path = os.path.join(base, cand)
+            if os.path.isfile(path):
+                return path
 
-    # Broader fallback: recursively inspect known Drive roots. This is slower
-    # than direct lookup, but it mirrors how the old notebook often needed to
-    # recover from varying raw-label folder layouts on Drive.
-    recursive_roots = [
-        BDD_RAW_DIR,
-        os.path.join(ECOCAR_ROOT, 'datasets'),
-        ECOCAR_ROOT,
-        '/content/bdd100k_raw',
-        '/content/bdd100k',
-    ]
-    name_hints = [
-        f'bdd100k_labels_images_{split}.json',
-        f'{split}.json',
-    ]
-    for r in recursive_roots:
-        if not os.path.isdir(r):
+    preferred_names = {f"bdd100k_labels_images_{split}.json", f"lane_{split}.json"}
+    for base in BDD_LABEL_SEARCH:
+        if not os.path.isdir(base):
             continue
-        try:
-            for dirpath, _, filenames in os.walk(r):
-                for fn in filenames:
-                    fn_l = fn.lower()
-                    if not fn_l.endswith('.json'):
-                        continue
-                    if split not in fn_l:
-                        continue
-                    if 'bdd100k' not in fn_l and 'label' not in fn_l and 'lane' not in fn_l and 'det' not in fn_l:
-                        continue
-                    full = os.path.join(dirpath, fn)
-                    if full not in candidates:
-                        candidates.append(full)
-        except Exception:
-            continue
-
-    # Stable ordering: prefer canonical filenames first.
-    def score(path: str) -> tuple[int, int, str]:
-        base = os.path.basename(path).lower()
-        pri = 9
-        if base == f'bdd100k_labels_images_{split}.json':
-            pri = 0
-        elif base == f'bdd100k_labels_{split}.json':
-            pri = 1
-        elif base == f'bdd100k_lane_marks_{split}.json':
-            pri = 2
-        elif base.startswith('lane_'):
-            pri = 3
-        elif base.startswith('det_'):
-            pri = 4
-        return (pri, len(path), path)
-
-    candidates = sorted(dict.fromkeys(candidates), key=score)
-    return candidates
-
-
-def find_lane_labels(split: str = "train") -> Optional[str]:
-    """Search for the consolidated BDD100K JSON used for poly2d lane parsing.
-
-    This intentionally mirrors the older YOLO26 notebook2 path detection.
-    """
-    cands = candidate_lane_label_paths(split)
-    return cands[0] if cands else None
+        for root, _dirs, files in os.walk(base):
+            for fn in files:
+                if fn in preferred_names:
+                    return os.path.join(root, fn)
+    return None
 
 
 def ensure_dirs(cfg: Config):

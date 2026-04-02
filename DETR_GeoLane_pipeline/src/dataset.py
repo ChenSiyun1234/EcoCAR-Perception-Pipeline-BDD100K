@@ -75,9 +75,10 @@ class BDD100KDualDataset(Dataset):
         # Resize to square
         img = cv2.resize(img, (self.img_size, self.img_size))
 
+        # Augmentation (simple)
         do_flip = bool(self.augment and np.random.rand() < 0.5)
         if do_flip:
-            img = img[:, ::-1, :].copy()  # horizontal flip
+            img = img[:, ::-1, :].copy()
 
         img_tensor = torch.from_numpy(img.astype(np.float32) / 255.0).permute(2, 0, 1)
 
