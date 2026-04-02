@@ -151,7 +151,11 @@ class Config:
 
 
 def _from_paths_config(split: str) -> Optional[str]:
-    """Mirror the old YOLO26 notebook2 behavior: read paths_config.yaml if present."""
+    """Mirror the old YOLO26 notebook2 behavior: read paths_config.yaml if present.
+
+    The old notebook accepted *any* JSON path whose key suggested train/val,
+    even if the basename was not exactly the canonical consolidated filename.
+    """
     if not os.path.isfile(PATHS_CONFIG):
         return None
     try:
@@ -159,43 +163,106 @@ def _from_paths_config(split: str) -> Optional[str]:
             pcfg = yaml.safe_load(f) or {}
     except Exception:
         return None
+
     for key, val in pcfg.items():
         if not isinstance(val, str) or not val.endswith('.json') or not os.path.isfile(val):
             continue
-        key_l = key.lower()
-        base = os.path.basename(val).lower()
-        if split in key_l and split in base:
+        key_l = str(key).lower()
+        val_l = val.lower()
+        base = os.path.basename(val_l)
+        if split in key_l or split in base or f'images_{split}' in val_l:
             return val
     return None
 
 
-def find_lane_labels(split: str = "train") -> Optional[str]:
-    """Search for BDD100K consolidated lane label JSON on Drive.
+def candidate_lane_label_paths(split: str = "train") -> list[str]:
+    """Return ordered candidate JSON paths, following old notebook2 logic first.
 
-    This intentionally follows the older YOLO26 notebook2/8 conventions:
-    1) paths_config.yaml override
-    2) bdd100k_raw/labels and bdd100k_raw/bdd100k/labels
-    3) older fallback datasets locations
+    Search order:
+      1) paths_config.yaml references
+      2) canonical direct paths under bdd100k_raw/labels and similar
+      3) recursive search under EcoCAR datasets for filenames containing the split
     """
     split = split.lower().strip()
+    candidates: list[str] = []
+
     from_cfg = _from_paths_config(split)
     if from_cfg:
-        return from_cfg
+        candidates.append(from_cfg)
 
-    candidates = [
+    direct_names = [
         f"bdd100k_labels_images_{split}.json",
-        f"bdd100k_lane_marks_{split}.json",
         f"bdd100k_labels_{split}.json",
-        f"det_{split}.json",
+        f"bdd100k_lane_marks_{split}.json",
         f"lane_{split}.json",
-        os.path.join(split, f"bdd100k_labels_images_{split}.json"),
+        f"det_{split}.json",
     ]
     for base in BDD_LABEL_SEARCH:
-        for cand in candidates:
-            path = os.path.join(base, cand)
-            if os.path.isfile(path):
-                return path
-    return None
+        for name in direct_names:
+            path = os.path.join(base, name)
+            if os.path.isfile(path) and path not in candidates:
+                candidates.append(path)
+
+    # Broader fallback: recursively inspect known Drive roots. This is slower
+    # than direct lookup, but it mirrors how the old notebook often needed to
+    # recover from varying raw-label folder layouts on Drive.
+    recursive_roots = [
+        BDD_RAW_DIR,
+        os.path.join(ECOCAR_ROOT, 'datasets'),
+        ECOCAR_ROOT,
+        '/content/bdd100k_raw',
+        '/content/bdd100k',
+    ]
+    name_hints = [
+        f'bdd100k_labels_images_{split}.json',
+        f'{split}.json',
+    ]
+    for r in recursive_roots:
+        if not os.path.isdir(r):
+            continue
+        try:
+            for dirpath, _, filenames in os.walk(r):
+                for fn in filenames:
+                    fn_l = fn.lower()
+                    if not fn_l.endswith('.json'):
+                        continue
+                    if split not in fn_l:
+                        continue
+                    if 'bdd100k' not in fn_l and 'label' not in fn_l and 'lane' not in fn_l and 'det' not in fn_l:
+                        continue
+                    full = os.path.join(dirpath, fn)
+                    if full not in candidates:
+                        candidates.append(full)
+        except Exception:
+            continue
+
+    # Stable ordering: prefer canonical filenames first.
+    def score(path: str) -> tuple[int, int, str]:
+        base = os.path.basename(path).lower()
+        pri = 9
+        if base == f'bdd100k_labels_images_{split}.json':
+            pri = 0
+        elif base == f'bdd100k_labels_{split}.json':
+            pri = 1
+        elif base == f'bdd100k_lane_marks_{split}.json':
+            pri = 2
+        elif base.startswith('lane_'):
+            pri = 3
+        elif base.startswith('det_'):
+            pri = 4
+        return (pri, len(path), path)
+
+    candidates = sorted(dict.fromkeys(candidates), key=score)
+    return candidates
+
+
+def find_lane_labels(split: str = "train") -> Optional[str]:
+    """Search for the consolidated BDD100K JSON used for poly2d lane parsing.
+
+    This intentionally mirrors the older YOLO26 notebook2 path detection.
+    """
+    cands = candidate_lane_label_paths(split)
+    return cands[0] if cands else None
 
 
 def ensure_dirs(cfg: Config):
