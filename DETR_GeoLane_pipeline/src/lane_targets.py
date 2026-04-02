@@ -1,21 +1,12 @@
 """
 BDD100K poly2d → structured lane targets.
 
-Parses the original BDD100K lane annotations (poly2d format) and converts
-them into fixed-length ordered point sequences for query-based lane training.
+Supports both:
+1) consolidated JSON files
+2) per-image JSON directories like /content/bdd100k_labels_unzipped/100k/train/*.json
 
-Reference: https://github.com/ucbdrive/bdd100k/blob/master/doc/format.md
-
-Target format per lane:
-  - existence: 1.0 (lane present) or 0.0 (padding)
-  - points: (N, 2) array of normalized (x, y) coordinates, ordered top→bottom
-  - visibility: (N,) boolean mask (1 = visible point)
-  - lane_type: integer category ID
-
-Per image:
-  - max_lanes x {existence, points, visibility, lane_type}
+Also supports both newer "labels" format and older "frames/objects" format.
 """
-
 import json
 import os
 import numpy as np
@@ -25,18 +16,12 @@ from .config import (
     BDD_IMG_W, BDD_IMG_H, LANE_TRAIN_CATS, LANE_CAT_TO_ID,
 )
 
-
 def parse_poly2d(poly2d_field) -> List[np.ndarray]:
-    """Extract polyline vertex arrays from BDD100K poly2d field.
-
-    The poly2d field can be:
-      - list of dicts: [{"vertices": [[x,y], ...], "types": "LL..."}, ...]
-      - list of lists: [[[x,y], [x,y], ...], ...]
-      - None or empty
-    """
     if poly2d_field is None:
         return []
     polylines = []
+    if isinstance(poly2d_field, dict):
+        poly2d_field = [poly2d_field]
     for item in poly2d_field:
         if isinstance(item, dict):
             verts = item.get("vertices", [])
@@ -51,32 +36,102 @@ def parse_poly2d(poly2d_field) -> List[np.ndarray]:
             polylines.append(np.array(verts, dtype=np.float64))
     return polylines
 
+def _maybe_prefix_lane_category(cat: str) -> str:
+    if not cat:
+        return ""
+    cat = str(cat)
+    if cat.startswith("lane/"):
+        return cat
+    if cat in [c.split("/", 1)[1] for c in LANE_TRAIN_CATS]:
+        return "lane/" + cat
+    return cat
+
+def _extract_lane_labels_from_record(record: dict) -> Tuple[str, List[dict]]:
+    """
+    Return (image_name, lane_labels) from either:
+      - {'name': ..., 'labels': [...]}
+      - {'name': ..., 'frames': [{'objects': [...]}]}
+      - per-image dict with top-level labels/objects
+    """
+    if not isinstance(record, dict):
+        return "", []
+
+    image_name = record.get("name", "") or ""
+    lane_labels: List[dict] = []
+
+    # Newer format: top-level labels
+    labels = record.get("labels")
+    if isinstance(labels, list):
+        for lab in labels:
+            if not isinstance(lab, dict):
+                continue
+            cat = _maybe_prefix_lane_category(lab.get("category", ""))
+            poly2d = lab.get("poly2d")
+            if poly2d and cat.startswith("lane/"):
+                lane_labels.append({
+                    "category": cat,
+                    "poly2d": poly2d,
+                })
+
+    # Older format: frames -> objects
+    frames = record.get("frames")
+    if isinstance(frames, list):
+        for fr in frames:
+            if not isinstance(fr, dict):
+                continue
+            if not image_name:
+                image_name = fr.get("name", "") or image_name
+            objs = fr.get("objects") or fr.get("labels") or []
+            if not isinstance(objs, list):
+                continue
+            for obj in objs:
+                if not isinstance(obj, dict):
+                    continue
+                cat = _maybe_prefix_lane_category(obj.get("category", ""))
+                # old format may store category='lane' with attributes
+                attrs = obj.get("attributes") or {}
+                if cat == "lane":
+                    lane_type = attrs.get("laneType")
+                    if isinstance(lane_type, str) and lane_type:
+                        cat = f"lane/{lane_type}"
+                poly2d = obj.get("poly2d")
+                if poly2d and cat.startswith("lane/"):
+                    lane_labels.append({
+                        "category": cat,
+                        "poly2d": poly2d,
+                    })
+
+    # Some per-image JSONs may directly store objects
+    objs = record.get("objects")
+    if isinstance(objs, list):
+        for obj in objs:
+            if not isinstance(obj, dict):
+                continue
+            cat = _maybe_prefix_lane_category(obj.get("category", ""))
+            attrs = obj.get("attributes") or {}
+            if cat == "lane":
+                lane_type = attrs.get("laneType")
+                if isinstance(lane_type, str) and lane_type:
+                    cat = f"lane/{lane_type}"
+            poly2d = obj.get("poly2d")
+            if poly2d and cat.startswith("lane/"):
+                lane_labels.append({
+                    "category": cat,
+                    "poly2d": poly2d,
+                })
+
+    return image_name, lane_labels
 
 def resample_polyline(pts: np.ndarray, n: int) -> Tuple[np.ndarray, np.ndarray]:
-    """Resample a polyline to exactly n evenly-spaced points.
-
-    Points are ordered top-to-bottom (ascending y in image coords).
-
-    Returns:
-        points: (n, 2) array
-        visibility: (n,) boolean — all True for now (future: clip to image)
-    """
-    # Order by y ascending (top to bottom)
     if pts[-1, 1] < pts[0, 1]:
         pts = pts[::-1].copy()
-
-    # Compute cumulative arc length
     diffs = np.diff(pts, axis=0)
     seg_lens = np.sqrt((diffs ** 2).sum(axis=1))
     cum_len = np.concatenate([[0.0], np.cumsum(seg_lens)])
     total = cum_len[-1]
-
     if total < 1e-6:
-        # Degenerate polyline
         out = np.tile(pts[0], (n, 1))
         return out, np.ones(n, dtype=bool)
-
-    # Sample at uniform arc-length intervals
     sample_dists = np.linspace(0.0, total, n)
     resampled = np.zeros((n, 2), dtype=np.float64)
     for i, d in enumerate(sample_dists):
@@ -89,67 +144,49 @@ def resample_polyline(pts: np.ndarray, n: int) -> Tuple[np.ndarray, np.ndarray]:
         else:
             t = (d - seg_start) / seg_len
             resampled[i] = pts[idx] * (1 - t) + pts[idx + 1] * t
-
-    visibility = np.ones(n, dtype=bool)
+    visibility = (
+        (resampled[:, 0] >= 0) & (resampled[:, 0] <= BDD_IMG_W - 1) &
+        (resampled[:, 1] >= 0) & (resampled[:, 1] <= BDD_IMG_H - 1)
+    )
     return resampled, visibility
-
 
 def frame_to_lane_targets(labels: List[dict], max_lanes: int = 10,
                           num_points: int = 72,
                           img_w: int = BDD_IMG_W,
                           img_h: int = BDD_IMG_H) -> Dict[str, np.ndarray]:
-    """Convert one frame's BDD100K labels to structured lane targets.
-
-    Args:
-        labels: list of label dicts from BDD100K JSON
-        max_lanes: maximum number of lane slots
-        num_points: points per lane
-        img_w, img_h: original image dimensions for normalization
-
-    Returns:
-        dict with arrays:
-          existence: (max_lanes,) float32
-          points:    (max_lanes, num_points, 2) float32, normalized [0,1]
-          visibility: (max_lanes, num_points) float32
-          lane_type: (max_lanes,) int64
-    """
     existence = np.zeros(max_lanes, dtype=np.float32)
     points = np.zeros((max_lanes, num_points, 2), dtype=np.float32)
     visibility = np.zeros((max_lanes, num_points), dtype=np.float32)
     lane_type = np.zeros(max_lanes, dtype=np.int64)
 
-    lane_idx = 0
+    # sort longer vertical lanes first
+    expanded = []
     for label in labels:
-        if lane_idx >= max_lanes:
-            break
-
-        cat = label.get("category", "")
+        cat = _maybe_prefix_lane_category(label.get("category", ""))
         if cat not in LANE_CAT_TO_ID:
             continue
+        for pl in parse_poly2d(label.get("poly2d")):
+            if len(pl) >= 2:
+                yspan = float(np.max(pl[:,1]) - np.min(pl[:,1]))
+                expanded.append((yspan, cat, pl))
+    expanded.sort(key=lambda x: x[0], reverse=True)
 
-        poly2d = label.get("poly2d")
-        polylines = parse_poly2d(poly2d)
-        if not polylines:
-            continue
-
-        for pl in polylines:
-            if lane_idx >= max_lanes:
-                break
-            if len(pl) < 2:
-                continue
-
-            resampled, vis = resample_polyline(pl, num_points)
-
-            # Normalize to [0, 1]
-            resampled[:, 0] /= img_w
-            resampled[:, 1] /= img_h
-            resampled = np.clip(resampled, 0.0, 1.0)
-
-            existence[lane_idx] = 1.0
-            points[lane_idx] = resampled.astype(np.float32)
-            visibility[lane_idx] = vis.astype(np.float32)
-            lane_type[lane_idx] = LANE_CAT_TO_ID[cat]
-            lane_idx += 1
+    lane_idx = 0
+    for _, cat, pl in expanded:
+        if lane_idx >= max_lanes:
+            break
+        pl = pl.copy()
+        pl[:, 0] = np.clip(pl[:, 0], 0, img_w - 1)
+        pl[:, 1] = np.clip(pl[:, 1], 0, img_h - 1)
+        resampled, vis = resample_polyline(pl, num_points)
+        resampled[:, 0] /= img_w
+        resampled[:, 1] /= img_h
+        resampled = np.clip(resampled, 0.0, 1.0)
+        existence[lane_idx] = 1.0
+        points[lane_idx] = resampled.astype(np.float32)
+        visibility[lane_idx] = vis.astype(np.float32)
+        lane_type[lane_idx] = LANE_CAT_TO_ID[cat]
+        lane_idx += 1
 
     return {
         "existence": existence,
@@ -158,82 +195,61 @@ def frame_to_lane_targets(labels: List[dict], max_lanes: int = 10,
         "lane_type": lane_type,
     }
 
-
 class LaneLabelCache:
-    """Loads and caches BDD100K lane annotations.
-
-    Supported sources:
-      1) consolidated JSON file
-      2) directory of per-image JSON files, e.g. /content/bdd100k_labels_unzipped/100k/train
-    """
-
-    def __init__(self, json_path: str, max_lanes: int = 10,
-                 num_points: int = 72):
+    """Load BDD100K lane annotations from either a JSON file or a directory of per-image JSONs."""
+    def __init__(self, source_path: str, max_lanes: int = 10, num_points: int = 72):
         self.max_lanes = max_lanes
         self.num_points = num_points
         self._cache: Dict[str, List[dict]] = {}
-        self.source = json_path
 
-        if not json_path:
+        if not source_path:
             print("  No lane labels source provided")
             return
 
-        if os.path.isdir(json_path):
-            self._load_from_directory(json_path)
-        elif os.path.isfile(json_path):
-            self._load_from_file(json_path)
-        else:
-            print(f"  No lane labels found at: {json_path}")
-
-    def _cache_frame(self, name: str, labels: List[dict]) -> None:
-        if not name:
-            return
-        lane_labels = [l for l in labels if l.get("category", "").startswith("lane/")]
-        if lane_labels:
-            self._cache[name] = lane_labels
-
-    def _load_from_file(self, json_path: str) -> None:
-        print(f"Loading lane labels from file {json_path} ...")
-        with open(json_path, "r") as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            for frame in data:
-                if not isinstance(frame, dict):
+        if os.path.isdir(source_path):
+            print(f"Loading lane labels from directory {source_path} ...")
+            count = 0
+            for name in sorted(os.listdir(source_path)):
+                if not name.lower().endswith(".json"):
                     continue
-                name = frame.get("name", "")
-                labels = frame.get("labels") or []
-                self._cache_frame(name, labels)
-        elif isinstance(data, dict):
-            name = data.get("name", "")
-            labels = data.get("labels") or []
-            if not name and json_path.lower().endswith('.json'):
-                name = os.path.splitext(os.path.basename(json_path))[0] + '.jpg'
-            self._cache_frame(name, labels)
-        print(f"  Cached lane labels for {len(self._cache)} frames")
+                fpath = os.path.join(source_path, name)
+                try:
+                    with open(fpath, "r") as f:
+                        data = json.load(f)
+                except Exception:
+                    continue
 
-    def _load_from_directory(self, dir_path: str) -> None:
-        print(f"Loading lane labels from directory {dir_path} ...")
-        files = sorted([f for f in os.listdir(dir_path) if f.lower().endswith('.json')])
-        for fname in files:
-            path = os.path.join(dir_path, fname)
-            try:
-                with open(path, 'r') as f:
-                    data = json.load(f)
-            except Exception:
-                continue
-            if isinstance(data, dict):
-                name = data.get('name') or (os.path.splitext(fname)[0] + '.jpg')
-                labels = data.get('labels') or []
-                self._cache_frame(name, labels)
-            elif isinstance(data, list):
-                # rare fallback if a file unexpectedly contains a list
-                for frame in data:
-                    if not isinstance(frame, dict):
-                        continue
-                    name = frame.get('name') or (os.path.splitext(fname)[0] + '.jpg')
-                    labels = frame.get('labels') or []
-                    self._cache_frame(name, labels)
-        print(f"  Cached lane labels for {len(self._cache)} frames")
+                if isinstance(data, list):
+                    # treat as mini-consolidated list
+                    records = data
+                else:
+                    records = [data]
+
+                file_cached = False
+                for rec in records:
+                    image_name, lane_labels = _extract_lane_labels_from_record(rec)
+                    if not image_name:
+                        image_name = os.path.splitext(name)[0] + ".jpg"
+                    if lane_labels:
+                        self._cache[image_name] = lane_labels
+                        file_cached = True
+                if file_cached:
+                    count += 1
+            print(f"  Cached lane labels for {len(self._cache)} frames")
+            return
+
+        if os.path.isfile(source_path):
+            print(f"Loading lane labels from {source_path} ...")
+            with open(source_path, "r") as f:
+                data = json.load(f)
+            records = data if isinstance(data, list) else [data]
+            for rec in records:
+                image_name, lane_labels = _extract_lane_labels_from_record(rec)
+                if image_name and lane_labels:
+                    self._cache[image_name] = lane_labels
+            print(f"  Cached lane labels for {len(self._cache)} frames")
+        else:
+            print(f"  No lane labels found at: {source_path}")
 
     def get(self, image_name: str) -> Optional[Dict[str, np.ndarray]]:
         labels = self._cache.get(image_name)
