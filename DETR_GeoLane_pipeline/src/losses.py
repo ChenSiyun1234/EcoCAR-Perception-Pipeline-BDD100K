@@ -147,6 +147,210 @@ def soft_polyline_mask(points: torch.Tensor,
     return mask.view(height, width)
 
 
+
+
+def _batched_visibility_mask(visibility: torch.Tensor | None, num_points: int, device, dtype) -> torch.Tensor | None:
+    if visibility is None:
+        return None
+    return (visibility > 0.5).to(device=device, dtype=dtype)
+
+
+def _batched_prepare_curves(points: torch.Tensor,
+                           visibility: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    points: [m, p, 2]
+    visibility: [m, p] or None
+    Returns:
+      curves: [m, p, 2]
+      point_mask: [m, p] float mask that mirrors _valid_curve_points semantics.
+    """
+    m, p, _ = points.shape
+    device = points.device
+    dtype = points.dtype
+    if visibility is None:
+        point_mask = torch.ones(m, p, device=device, dtype=dtype)
+        return points, point_mask
+
+    raw_mask = (visibility > 0.5)
+    valid_counts = raw_mask.sum(dim=-1)
+    fallback = valid_counts < 2
+    point_mask = raw_mask.to(dtype)
+    if fallback.any():
+        point_mask = point_mask.clone()
+        point_mask[fallback] = 1.0
+    return points, point_mask
+
+
+def _batched_resample_polyline(points: torch.Tensor,
+                               visibility: torch.Tensor | None,
+                               num: int) -> torch.Tensor:
+    """
+    Resamples a batch of polylines while preserving the original single-curve logic.
+    points: [m, p, 2]
+    visibility: [m, p] or None
+    returns: [m, num, 2]
+    """
+    curves, point_mask = _batched_prepare_curves(points, visibility)
+    m, p, _ = curves.shape
+    device = curves.device
+    dtype = curves.dtype
+
+    seg_valid = point_mask[:, :-1] * point_mask[:, 1:]
+    seg_vec = curves[:, 1:] - curves[:, :-1]
+    seg_len = torch.norm(seg_vec, dim=-1) * seg_valid
+
+    cum = torch.cat([torch.zeros(m, 1, device=device, dtype=dtype), seg_len.cumsum(dim=-1)], dim=-1)
+    total = cum[:, -1]
+
+    if num == 1:
+        base_t = torch.zeros(1, device=device, dtype=dtype)
+    else:
+        base_t = torch.linspace(0.0, 1.0, num, device=device, dtype=dtype)
+    t = base_t.unsqueeze(0) * total.unsqueeze(1)
+
+    idx = torch.searchsorted(cum.contiguous(), t.contiguous(), right=True) - 1
+    idx = idx.clamp(min=0, max=p - 2)
+
+    gather_idx = idx.unsqueeze(-1).expand(-1, -1, 2)
+    left = torch.gather(curves[:, :-1], 1, gather_idx)
+    right = torch.gather(curves[:, 1:], 1, gather_idx)
+    left_t = torch.gather(cum[:, :-1], 1, idx)
+    right_t = torch.gather(cum[:, 1:], 1, idx)
+    alpha = ((t - left_t) / (right_t - left_t).clamp(min=1e-8)).unsqueeze(-1)
+    out = left + alpha * (right - left)
+
+    degenerate = total < 1e-8
+    if degenerate.any():
+        first_point = curves[:, :1, :].expand(-1, num, -1)
+        out = torch.where(degenerate.view(-1, 1, 1), first_point, out)
+    return out
+
+
+def _pairwise_point_to_polyline_distance(points_a: torch.Tensor,
+                                         points_b: torch.Tensor) -> torch.Tensor:
+    """
+    points_a: [qa, r, 2]
+    points_b: [qb, r, 2]
+    returns mean distances [qa, qb] where each curve in A is sampled against every polyline in B.
+    """
+    qa, r, _ = points_a.shape
+    qb = points_b.shape[0]
+    if r == 0:
+        return torch.zeros(qa, qb, device=points_a.device, dtype=points_a.dtype)
+    if r == 1:
+        diff = points_a[:, None, :, :] - points_b[None, :, :1, :]
+        return torch.norm(diff, dim=-1).mean(dim=-1)
+
+    seg_a = points_b[:, :-1, :]
+    seg_b = points_b[:, 1:, :]
+    ab = seg_b - seg_a
+    denom = (ab * ab).sum(dim=-1).clamp(min=1e-8)
+
+    pts = points_a[:, None, :, None, :]
+    seg_a_e = seg_a[None, :, None, :, :]
+    ab_e = ab[None, :, None, :, :]
+
+    ap = pts - seg_a_e
+    t = (ap * ab_e).sum(dim=-1) / denom[None, :, None, :]
+    t = t.clamp(0.0, 1.0)
+    proj = seg_a_e + t.unsqueeze(-1) * ab_e
+    dist = torch.norm(pts - proj, dim=-1)
+    min_dist = dist.min(dim=-1).values
+    return min_dist.mean(dim=-1)
+
+
+def _batched_polyline_tangents(points: torch.Tensor) -> torch.Tensor:
+    if points.shape[1] < 2:
+        return torch.zeros_like(points)
+    fwd = torch.zeros_like(points)
+    fwd[:, 1:-1] = points[:, 2:] - points[:, :-2]
+    fwd[:, 0] = points[:, 1] - points[:, 0]
+    fwd[:, -1] = points[:, -1] - points[:, -2]
+    norm = torch.norm(fwd, dim=-1, keepdim=True).clamp(min=1e-8)
+    return fwd / norm
+
+
+def _pairwise_curve_to_curve_distance(pred_points: torch.Tensor,
+                                      gt_points: torch.Tensor,
+                                      gt_visibility: torch.Tensor | None = None,
+                                      resample_n: int = 96) -> dict[str, torch.Tensor]:
+    pred_rs = _batched_resample_polyline(pred_points, None, resample_n)
+    gt_rs = _batched_resample_polyline(gt_points, gt_visibility, resample_n)
+
+    d_pred_to_gt = _pairwise_point_to_polyline_distance(pred_rs, gt_rs)
+    d_gt_to_pred = _pairwise_point_to_polyline_distance(gt_rs, pred_rs).transpose(0, 1)
+    sym_dist = 0.5 * (d_pred_to_gt + d_gt_to_pred)
+
+    pred_tan = _batched_polyline_tangents(pred_rs)
+    gt_tan = _batched_polyline_tangents(gt_rs)
+    tan_align = 1.0 - (pred_tan[:, None] * gt_tan[None, :]).sum(dim=-1).abs().mean(dim=-1)
+
+    pred_second = pred_rs[:, 2:] - 2 * pred_rs[:, 1:-1] + pred_rs[:, :-2]
+    gt_second = gt_rs[:, 2:] - 2 * gt_rs[:, 1:-1] + gt_rs[:, :-2]
+    curvature_gap = F.smooth_l1_loss(
+        pred_second[:, None].expand(-1, gt_second.shape[0], -1, -1),
+        gt_second[None].expand(pred_second.shape[0], -1, -1, -1),
+        reduction='none',
+    ).mean(dim=(-1, -2))
+    return {'sym_dist': sym_dist, 'tan': tan_align, 'curvature': curvature_gap}
+
+
+def _batched_soft_polyline_mask(points: torch.Tensor,
+                                visibility: torch.Tensor | None = None,
+                                height: int = 72,
+                                width: int = 128,
+                                thickness: float = 0.03,
+                                sharpness: float = 80.0,
+                                grid: torch.Tensor | None = None) -> torch.Tensor:
+    """
+    points: [m, p, 2]
+    visibility: [m, p] or None
+    returns: [m, h, w]
+    """
+    curves, point_mask = _batched_prepare_curves(points, visibility)
+    m, p, _ = curves.shape
+    device = curves.device
+    dtype = curves.dtype
+    if grid is None:
+        grid = _grid_xy(height, width, device, dtype)
+    else:
+        grid = grid.to(device=device, dtype=dtype)
+
+    if p == 1:
+        dist = torch.norm(grid[None, :, :] - curves[:, :1, :], dim=-1)
+        mask = torch.sigmoid((thickness - dist) * sharpness)
+        return mask.view(m, height, width)
+
+    seg_a = curves[:, :-1, :]
+    seg_b = curves[:, 1:, :]
+    ab = seg_b - seg_a
+    denom = (ab * ab).sum(dim=-1).clamp(min=1e-8)
+    seg_valid = (point_mask[:, :-1] * point_mask[:, 1:]) > 0.5
+
+    pts = grid[None, :, None, :]
+    seg_a_e = seg_a[:, None, :, :]
+    ab_e = ab[:, None, :, :]
+
+    ap = pts - seg_a_e
+    t = (ap * ab_e).sum(dim=-1) / denom[:, None, :]
+    t = t.clamp(0.0, 1.0)
+    proj = seg_a_e + t.unsqueeze(-1) * ab_e
+    dist = torch.norm(pts - proj, dim=-1)
+    inf = torch.full_like(dist, float('inf'))
+    dist = torch.where(seg_valid[:, None, :], dist, inf)
+    min_dist = dist.min(dim=-1).values
+
+    no_valid_seg = ~seg_valid.any(dim=-1)
+    if no_valid_seg.any():
+        point_dist = torch.norm(grid[None, :, None, :] - curves[:, None, :, :], dim=-1)
+        point_dist = torch.where(point_mask[:, None, :] > 0.5, point_dist, inf[:, :, :point_mask.shape[1]])
+        fallback_dist = point_dist.min(dim=-1).values
+        min_dist = torch.where(no_valid_seg[:, None], fallback_dist, min_dist)
+
+    mask = torch.sigmoid((thickness - min_dist) * sharpness)
+    return mask.view(m, height, width)
+
+
 def aggregate_lane_mask(points: torch.Tensor,
                         existence: torch.Tensor,
                         visibility: torch.Tensor | None = None,
@@ -280,6 +484,15 @@ class LaneLoss(nn.Module):
         self.raster_h = raster_h
         self.raster_w = raster_w
         self.raster_thickness = raster_thickness
+        self._grid_cache = {}
+
+    def _get_raster_grid(self, device, dtype) -> torch.Tensor:
+        key = (device.type, device.index, str(dtype), self.raster_h, self.raster_w)
+        grid = self._grid_cache.get(key)
+        if grid is None:
+            grid = _grid_xy(self.raster_h, self.raster_w, device, dtype)
+            self._grid_cache[key] = grid
+        return grid
 
     @torch.no_grad()
     def _hungarian_match(self, pred_pts: torch.Tensor, pred_exist: torch.Tensor,
@@ -287,6 +500,7 @@ class LaneLoss(nn.Module):
                          gt_visibility: torch.Tensor | None = None) -> list:
         b = pred_pts.shape[0]
         matches = []
+        grid = self._get_raster_grid(pred_pts.device, pred_pts.dtype)
         for bi in range(b):
             gt_mask = gt_exist[bi] > 0.5
             n_gt = int(gt_mask.sum().item())
@@ -296,27 +510,34 @@ class LaneLoss(nn.Module):
             gt_pts_i = gt_pts[bi][gt_mask]
             gt_vis_i = gt_visibility[bi][gt_mask] if gt_visibility is not None else None
             gt_indices = torch.where(gt_mask)[0]
-            q = pred_pts.shape[1]
-            cost = torch.zeros(q, n_gt, device=pred_pts.device)
-            for qi in range(q):
-                for gi in range(n_gt):
-                    geom = curve_to_curve_distance(
-                        pred_pts[bi, qi], gt_pts_i[gi], None,
-                        gt_vis_i[gi] if gt_vis_i is not None else None,
-                        self.match_resample_n,
-                    )
-                    pred_mask = soft_polyline_mask(pred_pts[bi, qi], None, self.raster_h, self.raster_w, self.raster_thickness)
-                    gt_mask_img = soft_polyline_mask(
-                        gt_pts_i[gi],
-                        gt_vis_i[gi] if gt_vis_i is not None else None,
-                        self.raster_h, self.raster_w, self.raster_thickness,
-                    )
-                    inter = torch.minimum(pred_mask, gt_mask_img).sum()
-                    union = torch.maximum(pred_mask, gt_mask_img).sum().clamp(min=1e-6)
-                    overlap_cost = 1.0 - inter / union
-                    cost[qi, gi] = geom["sym_dist"] + 0.35 * geom["tan"] + 0.20 * geom["curvature"] + 0.75 * overlap_cost
+
+            geom = _pairwise_curve_to_curve_distance(
+                pred_pts[bi],
+                gt_pts_i,
+                gt_vis_i,
+                self.match_resample_n,
+            )
+            pred_masks = _batched_soft_polyline_mask(
+                pred_pts[bi], None,
+                self.raster_h, self.raster_w, self.raster_thickness,
+                grid=grid,
+            ).flatten(1)
+            gt_masks = _batched_soft_polyline_mask(
+                gt_pts_i, gt_vis_i,
+                self.raster_h, self.raster_w, self.raster_thickness,
+                grid=grid,
+            ).flatten(1)
+
+            pred_masks_e = pred_masks[:, None, :]
+            gt_masks_e = gt_masks[None, :, :]
+            inter = torch.minimum(pred_masks_e, gt_masks_e).sum(dim=-1)
+            union = torch.maximum(pred_masks_e, gt_masks_e).sum(dim=-1).clamp(min=1e-6)
+            overlap_cost = 1.0 - inter / union
+
+            cost = geom['sym_dist'] + 0.35 * geom['tan'] + 0.20 * geom['curvature'] + 0.75 * overlap_cost
             exist_prob = pred_exist[bi, :, 0].sigmoid()
-            cost -= 0.25 * exist_prob.unsqueeze(1)
+            cost = cost - 0.25 * exist_prob.unsqueeze(1)
+
             pi, gi = linear_sum_assignment(cost.detach().cpu().numpy())
             matches.append((pi.tolist(), gt_indices[gi].tolist()))
         return matches
@@ -327,23 +548,24 @@ class LaneLoss(nn.Module):
                      gt_visibility: torch.Tensor,
                      gt_lane_type: torch.Tensor,
                      has_lanes: torch.Tensor) -> Tuple[torch.Tensor, dict]:
-        pred_exist = outputs["lane_exist_logits"]
-        pred_pts = outputs["lane_pred_points"]
-        pred_type = outputs["lane_type_logits"]
-        pred_vis = outputs.get("lane_vis_logits")
+        pred_exist = outputs['lane_exist_logits']
+        pred_pts = outputs['lane_pred_points']
+        pred_type = outputs['lane_type_logits']
+        pred_vis = outputs.get('lane_vis_logits')
         b, q = pred_exist.shape[:2]
         device = pred_exist.device
         lane_mask = has_lanes > 0.5
         if not lane_mask.any():
             zero = torch.tensor(0.0, device=device)
             return zero, {
-                "lane_exist": 0.0,
-                "lane_curve": 0.0,
-                "lane_tangent": 0.0,
-                "lane_curvature": 0.0,
-                "lane_overlap": 0.0,
-                "lane_type": 0.0,
+                'lane_exist': 0.0,
+                'lane_curve': 0.0,
+                'lane_tangent': 0.0,
+                'lane_curvature': 0.0,
+                'lane_overlap': 0.0,
+                'lane_type': 0.0,
             }
+
         matches = self._hungarian_match(pred_pts, pred_exist, gt_points, gt_existence, gt_visibility)
         exist_target = torch.zeros(b, q, device=device)
         total_curve = torch.tensor(0.0, device=device)
@@ -353,26 +575,56 @@ class LaneLoss(nn.Module):
         total_type_loss = torch.tensor(0.0, device=device)
         total_vis_loss = torch.tensor(0.0, device=device)
         n_matched = 0
+        grid = self._get_raster_grid(pred_pts.device, pred_pts.dtype)
+
         for bi, (pi, gi) in enumerate(matches):
-            if not lane_mask[bi]:
+            if not lane_mask[bi] or len(pi) == 0:
                 continue
-            for p, g in zip(pi, gi):
-                exist_target[bi, p] = 1.0
-                geom = curve_to_curve_distance(pred_pts[bi, p], gt_points[bi, g], None, gt_visibility[bi, g], self.loss_resample_n)
-                total_curve += geom["sym_dist"]
-                total_tangent += geom["tan"]
-                total_curvature += geom["curvature"]
-                pred_mask_img = soft_polyline_mask(pred_pts[bi, p], None, self.raster_h, self.raster_w, self.raster_thickness)
-                gt_mask_img = soft_polyline_mask(gt_points[bi, g], gt_visibility[bi, g], self.raster_h, self.raster_w, self.raster_thickness)
-                inter = (pred_mask_img * gt_mask_img).sum()
-                union = (pred_mask_img + gt_mask_img - pred_mask_img * gt_mask_img).sum().clamp(min=1e-6)
-                dice = 1.0 - (2.0 * inter + 1e-6) / (pred_mask_img.sum() + gt_mask_img.sum() + 1e-6)
-                iou = 1.0 - inter / union
-                total_overlap += 0.5 * (iou + dice)
-                total_type_loss += F.cross_entropy(pred_type[bi, p].unsqueeze(0), gt_lane_type[bi, g].unsqueeze(0).to(device))
-                if pred_vis is not None:
-                    total_vis_loss += F.binary_cross_entropy_with_logits(pred_vis[bi, p], gt_visibility[bi, g].to(device))
-                n_matched += 1
+
+            pi_t = torch.as_tensor(pi, dtype=torch.long, device=device)
+            gi_t = torch.as_tensor(gi, dtype=torch.long, device=device)
+            exist_target[bi, pi_t] = 1.0
+
+            pred_pts_i = pred_pts[bi, pi_t]
+            gt_pts_i = gt_points[bi, gi_t]
+            gt_vis_i = gt_visibility[bi, gi_t]
+
+            geom = _pairwise_curve_to_curve_distance(
+                pred_pts_i,
+                gt_pts_i,
+                gt_vis_i,
+                self.loss_resample_n,
+            )
+            diag_idx = torch.arange(len(pi), device=device)
+            total_curve += geom['sym_dist'][diag_idx, diag_idx].sum()
+            total_tangent += geom['tan'][diag_idx, diag_idx].sum()
+            total_curvature += geom['curvature'][diag_idx, diag_idx].sum()
+
+            pred_masks = _batched_soft_polyline_mask(
+                pred_pts_i, None,
+                self.raster_h, self.raster_w, self.raster_thickness,
+                grid=grid,
+            ).flatten(1)
+            gt_masks = _batched_soft_polyline_mask(
+                gt_pts_i, gt_vis_i,
+                self.raster_h, self.raster_w, self.raster_thickness,
+                grid=grid,
+            ).flatten(1)
+            inter = (pred_masks * gt_masks).sum(dim=-1)
+            union = (pred_masks + gt_masks - pred_masks * gt_masks).sum(dim=-1).clamp(min=1e-6)
+            dice = 1.0 - (2.0 * inter + 1e-6) / (pred_masks.sum(dim=-1) + gt_masks.sum(dim=-1) + 1e-6)
+            iou = 1.0 - inter / union
+            total_overlap += (0.5 * (iou + dice)).sum()
+
+            total_type_loss += F.cross_entropy(pred_type[bi, pi_t], gt_lane_type[bi, gi_t].to(device), reduction='sum')
+            if pred_vis is not None:
+                total_vis_loss += F.binary_cross_entropy_with_logits(
+                    pred_vis[bi, pi_t],
+                    gt_visibility[bi, gi_t].to(device),
+                    reduction='sum',
+                )
+            n_matched += len(pi)
+
         exist_loss = F.binary_cross_entropy_with_logits(
             pred_exist[lane_mask, :, 0], exist_target[lane_mask],
             pos_weight=torch.tensor(3.0, device=device),
@@ -394,13 +646,13 @@ class LaneLoss(nn.Module):
             0.5 * vis_loss
         )
         return total, {
-            "lane_exist": float(exist_loss.item()),
-            "lane_curve": float(curve_loss.item()),
-            "lane_tangent": float(tangent_loss.item()),
-            "lane_curvature": float(curvature_loss.item()),
-            "lane_overlap": float(overlap_loss.item()),
-            "lane_type": float(type_loss.item()),
-            "lane_vis": float(vis_loss.item()),
+            'lane_exist': float(exist_loss.item()),
+            'lane_curve': float(curve_loss.item()),
+            'lane_tangent': float(tangent_loss.item()),
+            'lane_curvature': float(curvature_loss.item()),
+            'lane_overlap': float(overlap_loss.item()),
+            'lane_type': float(type_loss.item()),
+            'lane_vis': float(vis_loss.item()),
         }
 
     def forward(self, outputs: dict,
@@ -410,15 +662,15 @@ class LaneLoss(nn.Module):
                 gt_lane_type: torch.Tensor,
                 has_lanes: torch.Tensor) -> Tuple[torch.Tensor, dict]:
         total, info = self._loss_single(outputs, gt_existence, gt_points, gt_visibility, gt_lane_type, has_lanes)
-        aux_outputs = outputs.get("lane_aux_outputs", [])
+        aux_outputs = outputs.get('lane_aux_outputs', [])
         if aux_outputs:
             aux_total = torch.tensor(0.0, device=gt_points.device)
             for aux in aux_outputs:
                 aux_pack = {
-                    "lane_exist_logits": aux["exist_logits"],
-                    "lane_pred_points": aux["pred_points"],
-                    "lane_vis_logits": aux["vis_logits"],
-                    "lane_type_logits": aux["type_logits"],
+                    'lane_exist_logits': aux['exist_logits'],
+                    'lane_pred_points': aux['pred_points'],
+                    'lane_vis_logits': aux['vis_logits'],
+                    'lane_type_logits': aux['type_logits'],
                 }
                 aux_loss, _ = self._loss_single(aux_pack, gt_existence, gt_points, gt_visibility, gt_lane_type, has_lanes)
                 aux_total += aux_loss
