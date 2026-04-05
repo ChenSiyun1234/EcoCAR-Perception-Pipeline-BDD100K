@@ -1,327 +1,350 @@
 
-"""
-Utilities to rebuild the current DualPathNet dataset directly from the original
-BDD100K zip files stored in EcoCAR/downloads.
-
-This module intentionally avoids depending on legacy notebook2 logic.
-It supports:
-- extracting bdd100k_labels.zip, bdd100k_images_100k.zip, bdd100k_seg_maps.zip
-- locating detection JSON files in the extracted tree
-- creating a clean vehicle-only YOLO dataset with classes:
-  car, truck, bus, motorcycle, bicycle
-- wiring paths_config.yaml so the lane parser can discover raw labels later
-"""
-
 from __future__ import annotations
-
 import json
 import os
 import shutil
 import zipfile
 from collections import Counter
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Tuple, Optional
 
-import yaml
-
-from .config import ECOCAR_ROOT, DOWNLOADS_DIR, RAW_DATASET_ROOT, PATHS_CONFIG
-
-VEHICLE_NAME_TO_ID = {
-    "car": 0,
-    "truck": 1,
-    "bus": 2,
-    "motorcycle": 3,
-    "bicycle": 4,
-}
-VEHICLE_NAMES = ["car", "truck", "bus", "motorcycle", "bicycle"]
-
-DETECTION_JSON_CANDIDATES = {
-    "train": [
-        "labels/bdd100k_labels_images_train.json",
-        "bdd100k/labels/bdd100k_labels_images_train.json",
-        "bdd100k_labels_images_train.json",
-    ],
-    "val": [
-        "labels/bdd100k_labels_images_val.json",
-        "bdd100k/labels/bdd100k_labels_images_val.json",
-        "bdd100k_labels_images_val.json",
-    ],
-}
-
-IMAGE_DIR_CANDIDATES = {
-    "train": [
-        "images/100k/train",
-        "bdd100k/images/100k/train",
-        "100k/train",
-    ],
-    "val": [
-        "images/100k/val",
-        "bdd100k/images/100k/val",
-        "100k/val",
-    ],
-}
-
-SEG_DIR_CANDIDATES = {
-    "train": [
-        "seg/images/train",
-        "labels/sem_seg/masks/train",
-        "bdd100k/seg/images/train",
-        "bdd100k/labels/sem_seg/masks/train",
-    ],
-    "val": [
-        "seg/images/val",
-        "labels/sem_seg/masks/val",
-        "bdd100k/seg/images/val",
-        "bdd100k/labels/sem_seg/masks/val",
-    ],
-}
-
-@dataclass
-class RebuildSummary:
-    raw_root: str
-    output_root: str
-    train_json: str
-    val_json: str
-    train_images: str
-    val_images: str
-    train_seg: str = ""
-    val_seg: str = ""
-    counts_train: Dict[str, int] = None
-    counts_val: Dict[str, int] = None
+VEHICLE_CATEGORIES = ['car', 'truck', 'bus', 'motorcycle', 'bicycle']
+VEHICLE_TO_ID = {name: i for i, name in enumerate(VEHICLE_CATEGORIES)}
 
 
-def _touch(path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("ok\n", encoding="utf-8")
+def ensure_dir(path: str | Path) -> Path:
+    path = Path(path)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
-def ensure_zip_extracted(zip_path: str | Path, extract_root: str | Path, stamp_name: Optional[str] = None, force: bool = False) -> str:
+def _zip_members(zip_path: str | Path) -> List[str]:
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        return zf.namelist()
+
+
+def unzip_if_needed(zip_path: str | Path, dest_root: str | Path) -> Path:
     zip_path = Path(zip_path)
-    extract_root = Path(extract_root)
-    if not zip_path.is_file():
-        raise FileNotFoundError(f"Missing zip: {zip_path}")
-    stamp_name = stamp_name or (zip_path.stem + '.extracted')
-    stamp = extract_root / stamp_name
-    if force or not stamp.exists():
-        extract_root.mkdir(parents=True, exist_ok=True)
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            zf.extractall(extract_root)
-        _touch(stamp)
-    return str(extract_root)
+    dest_root = ensure_dir(dest_root)
+    marker = dest_root / f'.extracted_{zip_path.stem}'
+    if marker.exists():
+        return dest_root
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        zf.extractall(dest_root)
+    marker.write_text('ok')
+    return dest_root
 
 
-def _resolve_first(root: str | Path, rel_candidates: Iterable[str]) -> Optional[str]:
+def _find_by_suffix(root: str | Path, suffixes: List[str]) -> Optional[Path]:
     root = Path(root)
-    for rel in rel_candidates:
-        p = root / rel
-        if p.exists():
-            return str(p)
+    suffixes = [s.lower() for s in suffixes]
+    for p in root.rglob('*'):
+        if p.is_file() and any(str(p).lower().endswith(s) for s in suffixes):
+            return p
     return None
 
 
-def locate_detection_jsons(raw_root: str | Path) -> Tuple[str, str]:
-    train_json = _resolve_first(raw_root, DETECTION_JSON_CANDIDATES['train'])
-    val_json = _resolve_first(raw_root, DETECTION_JSON_CANDIDATES['val'])
-    if not train_json or not val_json:
+def _find_all_jsons(root: str | Path) -> List[Path]:
+    return sorted([p for p in Path(root).rglob('*.json') if p.is_file()])
+
+
+def _score_json_candidate(path: Path) -> int:
+    s = str(path).lower()
+    score = 0
+    if 'train' in s:
+        score += 4
+    if 'val' in s or 'valid' in s:
+        score += 4
+    if 'detect' in s or 'det_' in s or 'labels_images' in s:
+        score += 3
+    if 'lane' in s or 'seg' in s or 'drivable' in s:
+        score -= 4
+    return score
+
+
+def _classify_json_by_content(path: Path) -> Optional[str]:
+    try:
+        with open(path, 'r') as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    if not isinstance(data, list) or len(data) == 0:
+        return None
+    sample = data[0]
+    if isinstance(sample, dict):
+        labels = sample.get('labels')
+        name = sample.get('name')
+        if isinstance(labels, list) and isinstance(name, str):
+            cats = []
+            for lab in labels[:20]:
+                if isinstance(lab, dict):
+                    c = lab.get('category')
+                    if isinstance(c, str):
+                        cats.append(c)
+            if cats:
+                return 'detection'
+    return None
+
+
+def locate_detection_jsons(raw_root: str | Path) -> Tuple[Path, Path]:
+    raw_root = Path(raw_root)
+    jsons = _find_all_jsons(raw_root)
+    det_jsons = []
+    for p in jsons:
+        kind = _classify_json_by_content(p)
+        if kind == 'detection':
+            det_jsons.append(p)
+    if not det_jsons:
+        raise FileNotFoundError(f'No detection-style JSONs found under {raw_root}')
+
+    train_candidates = [p for p in det_jsons if 'train' in str(p).lower()]
+    val_candidates = [p for p in det_jsons if 'val' in str(p).lower() or 'valid' in str(p).lower()]
+
+    if not train_candidates or not val_candidates:
+        # fallback: pick best-scored pair by name and size
+        det_jsons = sorted(det_jsons, key=lambda p: (-_score_json_candidate(p), str(p)))
+        train_candidates = det_jsons
+        val_candidates = det_jsons
+
+    train_json = sorted(train_candidates, key=lambda p: (-_score_json_candidate(p), str(p)))[0]
+    val_json = sorted(val_candidates, key=lambda p: (-_score_json_candidate(p), str(p)))[0]
+
+    if train_json == val_json:
+        # choose another val candidate if possible
+        for p in det_jsons:
+            if p != train_json and ('val' in str(p).lower() or 'valid' in str(p).lower()):
+                val_json = p
+                break
+
+    if train_json == val_json:
         raise FileNotFoundError(
-            f"Could not locate train/val detection JSONs under {raw_root}. "
-            f"Expected names like bdd100k_labels_images_train.json and _val.json"
+            f'Found detection JSONs under {raw_root}, but could not distinguish train/val. Candidates: {[str(p) for p in det_jsons[:10]]}'
         )
     return train_json, val_json
 
 
-def locate_image_dirs(raw_root: str | Path) -> Tuple[str, str]:
-    train_dir = _resolve_first(raw_root, IMAGE_DIR_CANDIDATES['train'])
-    val_dir = _resolve_first(raw_root, IMAGE_DIR_CANDIDATES['val'])
-    if not train_dir or not val_dir:
-        raise FileNotFoundError(f"Could not locate train/val image directories under {raw_root}")
+def locate_image_dirs(raw_root: str | Path) -> Tuple[Path, Path]:
+    raw_root = Path(raw_root)
+    train_dir = None
+    val_dir = None
+    for p in raw_root.rglob('*'):
+        if p.is_dir():
+            s = str(p).lower().replace('\','/')
+            if s.endswith('/train') and '/images/' in s and ('100k' in s or '10k' in s):
+                train_dir = p if train_dir is None else train_dir
+            if s.endswith('/val') and '/images/' in s and ('100k' in s or '10k' in s):
+                val_dir = p if val_dir is None else val_dir
+    if train_dir is None or val_dir is None:
+        # fallback broad search
+        dirs = [p for p in raw_root.rglob('*') if p.is_dir()]
+        for p in dirs:
+            s = str(p).lower().replace('\','/')
+            if train_dir is None and s.endswith('/train') and '/images/' in s:
+                train_dir = p
+            if val_dir is None and s.endswith('/val') and '/images/' in s:
+                val_dir = p
+    if train_dir is None or val_dir is None:
+        raise FileNotFoundError(f'Could not locate images train/val dirs under {raw_root}')
     return train_dir, val_dir
 
 
-def locate_seg_dirs(raw_root: str | Path) -> Tuple[str, str]:
-    train_dir = _resolve_first(raw_root, SEG_DIR_CANDIDATES['train']) or ""
-    val_dir = _resolve_first(raw_root, SEG_DIR_CANDIDATES['val']) or ""
-    return train_dir, val_dir
+def locate_lane_json(raw_root: str | Path) -> Optional[Path]:
+    raw_root = Path(raw_root)
+    candidates = []
+    for p in raw_root.rglob('*.json'):
+        s = str(p).lower()
+        if 'lane' in s and ('train' in s or 'val' in s or 'labels' in s or 'poly' in s):
+            candidates.append(p)
+    if candidates:
+        return sorted(candidates, key=lambda p: (0 if 'lane' in str(p).lower() else 1, str(p)))[0]
+    return None
 
 
-def _clip01(x: float) -> float:
-    return max(0.0, min(1.0, x))
+def locate_seg_maps_root(raw_root: str | Path) -> Optional[Path]:
+    raw_root = Path(raw_root)
+    for p in raw_root.rglob('*'):
+        if p.is_dir():
+            s = str(p).lower().replace('\','/')
+            if '/seg/' in s or 'seg_maps' in s or s.endswith('/train') and 'labels' in s:
+                return p
+    return None
 
 
-def _box2d_to_yolo(box2d: dict, img_w: float = 1280.0, img_h: float = 720.0) -> Optional[Tuple[float, float, float, float]]:
+def _extract_xywh(obj: dict) -> Optional[Tuple[float, float, float, float]]:
+    box2d = obj.get('box2d')
+    if not isinstance(box2d, dict):
+        return None
     try:
-        x1 = float(box2d['x1'])
-        y1 = float(box2d['y1'])
-        x2 = float(box2d['x2'])
-        y2 = float(box2d['y2'])
+        x1 = float(box2d['x1']); y1 = float(box2d['y1']); x2 = float(box2d['x2']); y2 = float(box2d['y2'])
     except Exception:
         return None
     if x2 <= x1 or y2 <= y1:
         return None
-    xc = ((x1 + x2) * 0.5) / img_w
-    yc = ((y1 + y2) * 0.5) / img_h
-    w = (x2 - x1) / img_w
-    h = (y2 - y1) / img_h
-    xc, yc, w, h = map(_clip01, (xc, yc, w, h))
-    if w <= 0.0 or h <= 0.0:
-        return None
+    xc = (x1 + x2) / 2.0
+    yc = (y1 + y2) / 2.0
+    w = x2 - x1
+    h = y2 - y1
     return xc, yc, w, h
 
 
-def _iter_detection_labels(record: dict) -> Iterable[Tuple[int, Tuple[float, float, float, float]]]:
-    for lab in record.get('labels', []) or []:
-        if not isinstance(lab, dict):
-            continue
-        category = str(lab.get('category', '') or '').strip().lower()
-        if category not in VEHICLE_NAME_TO_ID:
-            continue
-        box2d = lab.get('box2d') or {}
-        yolo = _box2d_to_yolo(box2d)
-        if yolo is None:
-            continue
-        yield VEHICLE_NAME_TO_ID[category], yolo
-
-
-def convert_detection_json_to_vehicle_yolo(json_path: str | Path, labels_out_dir: str | Path) -> Dict[str, int]:
-    json_path = Path(json_path)
-    labels_out_dir = Path(labels_out_dir)
-    labels_out_dir.mkdir(parents=True, exist_ok=True)
-    with open(json_path, 'r', encoding='utf-8') as f:
-        records = json.load(f)
+def convert_detection_json_to_vehicle_yolo(json_path: str | Path, labels_out: str | Path) -> Dict[str, int]:
+    labels_out = ensure_dir(labels_out)
+    with open(json_path, 'r') as f:
+        data = json.load(f)
     counts = Counter()
-    for rec in records:
-        name = rec.get('name')
-        if not isinstance(name, str) or not name:
-            continue
-        stem = Path(name).stem
+    written = 0
+    skipped_no_box = 0
+    for item in data:
+        name = item.get('name')
+        attrs = item.get('attributes', {}) or {}
+        img_w = float(item.get('width', 1280) or 1280)
+        img_h = float(item.get('height', 720) or 720)
+        labels = item.get('labels', []) or []
         rows = []
-        for cls_id, (xc, yc, w, h) in _iter_detection_labels(rec):
-            rows.append(f"{cls_id} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f}")
-            counts[VEHICLE_NAMES[cls_id]] += 1
-        (labels_out_dir / f"{stem}.txt").write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
-    return dict(counts)
-
-
-def _link_or_copy_tree(src: str | Path, dst: str | Path, mode: str = 'symlink'):
-    src = Path(src)
-    dst = Path(dst)
-    if dst.exists() or dst.is_symlink():
-        return
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if mode == 'copy':
-        shutil.copytree(src, dst)
-    else:
-        os.symlink(src, dst, target_is_directory=True)
-
-
-def write_vehicle_yaml(output_root: str | Path):
-    output_root = Path(output_root)
-    yaml_path = output_root / 'bdd100k_vehicle5.yaml'
-    data = {
-        'path': str(output_root),
-        'train': 'images/train',
-        'val': 'images/val',
-        'nc': 5,
-        'names': {i: n for i, n in enumerate(VEHICLE_NAMES)},
+        for lab in labels:
+            cat = lab.get('category')
+            if cat not in VEHICLE_TO_ID:
+                continue
+            box = _extract_xywh(lab)
+            if box is None:
+                skipped_no_box += 1
+                continue
+            xc, yc, w, h = box
+            rows.append(f"{VEHICLE_TO_ID[cat]} {xc/img_w:.6f} {yc/img_h:.6f} {w/img_w:.6f} {h/img_h:.6f}")
+            counts[cat] += 1
+        stem = Path(name).stem if name else f'item_{written:06d}'
+        (labels_out / f'{stem}.txt').write_text('
+'.join(rows))
+        written += 1
+    return {
+        'files_written': written,
+        'skipped_no_box': skipped_no_box,
+        **{k: int(counts[k]) for k in VEHICLE_CATEGORIES},
     }
-    with open(yaml_path, 'w', encoding='utf-8') as f:
-        yaml.safe_dump(data, f, sort_keys=False)
-    return str(yaml_path)
 
 
-def write_paths_config(raw_root: str | Path, dataset_root: str | Path, extra: Optional[dict] = None):
-    raw_root = str(raw_root)
-    dataset_root = str(dataset_root)
-    payload = {
-        'bdd_raw_dir': raw_root,
-        'bdd100k_raw': raw_root,
-        'bdd_root': raw_root,
-        'bdd100k_root': raw_root,
-        'raw_bdd100k_dir': raw_root,
-        'dataset_root': dataset_root,
-    }
-    if extra:
-        payload.update(extra)
-    Path(PATHS_CONFIG).parent.mkdir(parents=True, exist_ok=True)
-    with open(PATHS_CONFIG, 'w', encoding='utf-8') as f:
-        yaml.safe_dump(payload, f, sort_keys=False)
-    return PATHS_CONFIG
+def _link_or_copy_images(src_dir: str | Path, dst_dir: str | Path):
+    src_dir = Path(src_dir); dst_dir = ensure_dir(dst_dir)
+    count = 0
+    for p in src_dir.iterdir():
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in {'.jpg', '.jpeg', '.png'}:
+            continue
+        dst = dst_dir / p.name
+        if dst.exists():
+            count += 1
+            continue
+        try:
+            os.symlink(p, dst)
+        except Exception:
+            shutil.copy2(p, dst)
+        count += 1
+    return count
 
 
-def summarize_label_ids(labels_dir: str | Path, max_files: int = 2000) -> Dict[int, int]:
-    labels_dir = Path(labels_dir)
-    counts = Counter()
-    files = sorted(labels_dir.glob('*.txt'))[:max_files]
-    for p in files:
-        with open(p, 'r', encoding='utf-8') as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) < 5:
-                    continue
-                try:
-                    counts[int(float(parts[0]))] += 1
-                except Exception:
-                    continue
-    return dict(sorted(counts.items()))
+def write_vehicle_yaml(dataset_root: str | Path) -> Path:
+    dataset_root = Path(dataset_root)
+    yaml_path = dataset_root / 'bdd100k_vehicle5.yaml'
+    content = (
+        f"path: {dataset_root}
+"
+        "train: images/train
+"
+        "val: images/val
+"
+        "nc: 5
+"
+        "names:
+"
+        "  0: car
+"
+        "  1: truck
+"
+        "  2: bus
+"
+        "  3: motorcycle
+"
+        "  4: bicycle
+"
+    )
+    yaml_path.write_text(content)
+    return yaml_path
 
 
-def rebuild_dualpath_dataset(
-    downloads_dir: str | Path = DOWNLOADS_DIR,
-    raw_root: str | Path = RAW_DATASET_ROOT,
-    output_root: str | Path = os.path.join(ECOCAR_ROOT, 'datasets', 'bdd100k_yolo'),
-    image_mode: str = 'symlink',
-    force_extract: bool = False,
-) -> RebuildSummary:
+def write_paths_config(dataset_root: str | Path, raw_root: str | Path, lane_json: Optional[str | Path], seg_root: Optional[str | Path]) -> Path:
+    dataset_root = Path(dataset_root)
+    p = dataset_root / 'paths_config.yaml'
+    lines = [f"dataset_root: {dataset_root}", f"raw_root: {Path(raw_root)}"]
+    lines.append(f"lane_json: {Path(lane_json) if lane_json else ''}")
+    lines.append(f"seg_maps_root: {Path(seg_root) if seg_root else ''}")
+    p.write_text('
+'.join(lines) + '
+')
+    return p
+
+
+def inspect_download_archives(downloads_dir: str | Path) -> Dict[str, List[str]]:
     downloads_dir = Path(downloads_dir)
-    raw_root = Path(raw_root)
-    output_root = Path(output_root)
+    out = {}
+    for name in ['bdd100k_labels.zip', 'bdd100k_images_100k.zip', 'bdd100k_seg_maps.zip']:
+        zp = downloads_dir / name
+        if zp.exists():
+            members = _zip_members(zp)
+            out[name] = members[:30]
+        else:
+            out[name] = []
+    return out
 
-    labels_zip = downloads_dir / 'bdd100k_labels.zip'
-    images_zip = downloads_dir / 'bdd100k_images_100k.zip'
-    seg_zip = downloads_dir / 'bdd100k_seg_maps.zip'
 
-    ensure_zip_extracted(labels_zip, raw_root, stamp_name='.labels_extracted', force=force_extract)
-    ensure_zip_extracted(images_zip, raw_root, stamp_name='.images_extracted', force=force_extract)
-    if seg_zip.is_file():
-        ensure_zip_extracted(seg_zip, raw_root, stamp_name='.seg_extracted', force=force_extract)
+def rebuild_dualpath_dataset(downloads_dir: str | Path, raw_root: str | Path, output_root: str | Path, force_reextract: bool = False) -> Dict[str, object]:
+    downloads_dir = Path(downloads_dir)
+    raw_root = ensure_dir(raw_root)
+    output_root = ensure_dir(output_root)
+
+    required = {
+        'labels': downloads_dir / 'bdd100k_labels.zip',
+        'images': downloads_dir / 'bdd100k_images_100k.zip',
+        'seg': downloads_dir / 'bdd100k_seg_maps.zip',
+    }
+    missing = [str(p) for p in required.values() if not p.exists()]
+    if missing:
+        raise FileNotFoundError(f'Missing required zip files: {missing}')
+
+    for key, zp in required.items():
+        marker = raw_root / f'.extracted_{zp.stem}'
+        if force_reextract and marker.exists():
+            marker.unlink()
+        unzip_if_needed(zp, raw_root)
 
     train_json, val_json = locate_detection_jsons(raw_root)
-    train_images, val_images = locate_image_dirs(raw_root)
-    train_seg, val_seg = locate_seg_dirs(raw_root)
+    train_img_dir, val_img_dir = locate_image_dirs(raw_root)
+    lane_json = locate_lane_json(raw_root)
+    seg_root = locate_seg_maps_root(raw_root)
 
-    (output_root / 'images').mkdir(parents=True, exist_ok=True)
-    (output_root / 'labels').mkdir(parents=True, exist_ok=True)
+    img_train_out = ensure_dir(output_root / 'images' / 'train')
+    img_val_out = ensure_dir(output_root / 'images' / 'val')
+    lbl_train_out = ensure_dir(output_root / 'labels' / 'train')
+    lbl_val_out = ensure_dir(output_root / 'labels' / 'val')
 
-    _link_or_copy_tree(train_images, output_root / 'images' / 'train', mode=image_mode)
-    _link_or_copy_tree(val_images, output_root / 'images' / 'val', mode=image_mode)
-    if train_seg:
-        _link_or_copy_tree(train_seg, output_root / 'seg_maps' / 'train', mode=image_mode)
-    if val_seg:
-        _link_or_copy_tree(val_seg, output_root / 'seg_maps' / 'val', mode=image_mode)
+    train_img_count = _link_or_copy_images(train_img_dir, img_train_out)
+    val_img_count = _link_or_copy_images(val_img_dir, img_val_out)
+    train_counts = convert_detection_json_to_vehicle_yolo(train_json, lbl_train_out)
+    val_counts = convert_detection_json_to_vehicle_yolo(val_json, lbl_val_out)
+    yaml_path = write_vehicle_yaml(output_root)
+    paths_cfg = write_paths_config(output_root, raw_root, lane_json, seg_root)
 
-    counts_train = convert_detection_json_to_vehicle_yolo(train_json, output_root / 'labels' / 'train')
-    counts_val = convert_detection_json_to_vehicle_yolo(val_json, output_root / 'labels' / 'val')
-
-    write_vehicle_yaml(output_root)
-    write_paths_config(raw_root, output_root, extra={
-        'train_detection_json': train_json,
-        'val_detection_json': val_json,
-        'train_images_dir': train_images,
-        'val_images_dir': val_images,
-        'train_seg_dir': train_seg,
-        'val_seg_dir': val_seg,
-    })
-
-    return RebuildSummary(
-        raw_root=str(raw_root),
-        output_root=str(output_root),
-        train_json=train_json,
-        val_json=val_json,
-        train_images=train_images,
-        val_images=val_images,
-        train_seg=train_seg,
-        val_seg=val_seg,
-        counts_train=counts_train,
-        counts_val=counts_val,
-    )
+    return {
+        'train_json': str(train_json),
+        'val_json': str(val_json),
+        'train_image_dir': str(train_img_dir),
+        'val_image_dir': str(val_img_dir),
+        'lane_json': str(lane_json) if lane_json else None,
+        'seg_maps_root': str(seg_root) if seg_root else None,
+        'train_image_count': int(train_img_count),
+        'val_image_count': int(val_img_count),
+        'train_counts': train_counts,
+        'val_counts': val_counts,
+        'yaml_path': str(yaml_path),
+        'paths_config': str(paths_cfg),
+    }
