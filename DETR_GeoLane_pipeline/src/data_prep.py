@@ -90,7 +90,7 @@ def locate_detection_jsons(raw_root: str | Path) -> Tuple[Path, Path]:
         if _classify_json_by_content(p) == "detection":
             det_jsons.append(p)
 
-    if not det_jsons:
+    if not det_sources:
         raise FileNotFoundError(f"No detection-style JSONs found under {raw_root}")
 
     train_candidates = [p for p in det_jsons if "train" in _norm_path_str(p)]
@@ -113,21 +113,42 @@ def locate_detection_jsons(raw_root: str | Path) -> Tuple[Path, Path]:
 
     if train_json == val_json:
         raise FileNotFoundError(
-            "Found detection JSONs but could not distinguish train and val. "
-            f"Candidates: {[str(p) for p in det_jsons[:10]]}"
+            "Found detection sources but could not distinguish train and val. "
+            f"Candidates: {[str(p) for p in det_sources[:10]]}"
         )
     return train_json, val_json
 
 
 def locate_image_dirs(raw_root: str | Path) -> Tuple[Path, Path]:
     raw_root = Path(raw_root)
+<<<<<<< HEAD
     train_dir: Optional[Path] = None
     val_dir: Optional[Path] = None
+=======
+>>>>>>> parent of 54bd810 (Update data_prep.py)
 
+    preferred_train = [
+        raw_root / "bdd100k" / "images" / "100k" / "train",
+        raw_root / "images" / "100k" / "train",
+        raw_root / "100k" / "train",
+    ]
+    preferred_val = [
+        raw_root / "bdd100k" / "images" / "100k" / "val",
+        raw_root / "images" / "100k" / "val",
+        raw_root / "100k" / "val",
+    ]
+    train_dir = next((p for p in preferred_train if p.is_dir() and any(x.suffix.lower() in IMAGE_SUFFIXES for x in p.iterdir() if x.is_file())), None)
+    val_dir = next((p for p in preferred_val if p.is_dir() and any(x.suffix.lower() in IMAGE_SUFFIXES for x in p.iterdir() if x.is_file())), None)
+    if train_dir and val_dir:
+        return train_dir, val_dir
+
+    train_dir = None
+    val_dir = None
     for p in raw_root.rglob("*"):
         if not p.is_dir():
             continue
         s = _norm_path_str(p)
+<<<<<<< HEAD
         if train_dir is None and s.endswith("/train") and "/images/" in s and ("100k" in s or "10k" in s):
             train_dir = p
         if val_dir is None and s.endswith("/val") and "/images/" in s and ("100k" in s or "10k" in s):
@@ -144,6 +165,17 @@ def locate_image_dirs(raw_root: str | Path) -> Tuple[Path, Path]:
                 val_dir = p
 
     if train_dir is None or val_dir is None:
+=======
+        has_images = any(x.suffix.lower() in IMAGE_SUFFIXES for x in p.iterdir() if x.is_file())
+        if not has_images:
+            continue
+        if train_dir is None and s.endswith("/train") and ("/images/" in s or "/100k/train" in s):
+            train_dir = p
+        if val_dir is None and s.endswith("/val") and ("/images/" in s or "/100k/val" in s):
+            val_dir = p
+
+    if train_dir is None or val_dir is None:
+>>>>>>> parent of 54bd810 (Update data_prep.py)
         raise FileNotFoundError(f"Could not locate image train/val directories under {raw_root}")
 
     return train_dir, val_dir
@@ -151,6 +183,12 @@ def locate_image_dirs(raw_root: str | Path) -> Tuple[Path, Path]:
 
 def locate_lane_json(raw_root: str | Path) -> Optional[Path]:
     raw_root = Path(raw_root)
+<<<<<<< HEAD
+=======
+    for p in [raw_root / "100k" / "train", raw_root / "bdd100k" / "100k" / "train"]:
+        if p.is_dir():
+            return p
+>>>>>>> parent of 54bd810 (Update data_prep.py)
     candidates: List[Path] = []
     for p in raw_root.rglob("*.json"):
         s = _norm_path_str(p)
