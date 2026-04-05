@@ -1,103 +1,27 @@
 from __future__ import annotations
 
-from .config import BDD_IMG_W, BDD_IMG_H
-
 import json
 import os
 import shutil
 import zipfile
 from collections import Counter
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Iterable, Union
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 VEHICLE_CATEGORIES = ["car", "truck", "bus", "motorcycle", "bicycle"]
 VEHICLE_TO_ID = {name: i for i, name in enumerate(VEHICLE_CATEGORIES)}
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
-
-
-def _load_json(path: str | Path):
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _iter_records_from_source(source: str | Path) -> Iterable[Tuple[dict, Path]]:
-    source = Path(source)
-    if source.is_dir():
-        for p in sorted(source.rglob("*.json")):
-            try:
-                data = _load_json(p)
-            except Exception:
-                continue
-            if isinstance(data, dict):
-                yield data, p
-            elif isinstance(data, list):
-                for item in data:
-                    if isinstance(item, dict):
-                        yield item, p
-        return
-
-    try:
-        data = _load_json(source)
-    except Exception:
-        return
-    if isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict):
-                yield item, source
-    elif isinstance(data, dict):
-        yield data, source
-
-
-def _record_name(record: dict, fallback: Path) -> str:
-    name = record.get("name")
-    if isinstance(name, str) and name.strip():
-        return Path(name).name
-    return fallback.stem + ".jpg"
-
-
-def _extract_object_labels(record: dict) -> List[dict]:
-    labels = record.get("labels")
-    if isinstance(labels, list):
-        return [x for x in labels if isinstance(x, dict)]
-    frames = record.get("frames")
-    if isinstance(frames, list) and frames:
-        objs = []
-        for fr in frames:
-            if isinstance(fr, dict) and isinstance(fr.get("objects"), list):
-                objs.extend([x for x in fr["objects"] if isinstance(x, dict)])
-        if objs:
-            return objs
-    objs = record.get("objects")
-    if isinstance(objs, list):
-        return [x for x in objs if isinstance(x, dict)]
-    return []
-
-
-def _has_detection_content(record: dict) -> bool:
-    labels = _extract_object_labels(record)
-    for lab in labels[:100]:
-        cat = lab.get("category")
-        if isinstance(cat, str) and cat in VEHICLE_TO_ID:
-            return True
-        if isinstance(lab.get("box2d"), dict):
-            return True
-    return False
-
-
-def _classify_source(path: Path) -> Optional[str]:
-    if path.is_dir():
-        checked = 0
-        for jp in sorted(path.rglob("*.json"))[:50]:
-            try:
-                data = _load_json(jp)
-            except Exception:
-                continue
-            checked += 1
-            rec = data if isinstance(data, dict) else (data[0] if isinstance(data, list) and data and isinstance(data[0], dict) else None)
-            if isinstance(rec, dict) and _has_detection_content(rec):
-                return "detection"
-        return None if checked else None
-    return _classify_json_by_content(path)
+BDD_IMG_W = 1280.0
+BDD_IMG_H = 720.0
+CATEGORY_ALIASES = {
+    "car": "car",
+    "truck": "truck",
+    "bus": "bus",
+    "motor": "motorcycle",
+    "motorcycle": "motorcycle",
+    "bike": "bicycle",
+    "bicycle": "bicycle",
+}
 
 
 def ensure_dir(path: str | Path) -> Path:
@@ -134,10 +58,10 @@ def _norm_path_str(path: str | Path) -> str:
 def _score_json_candidate(path: Path) -> int:
     s = _norm_path_str(path)
     score = 0
-    if "train" in s:
-        score += 4
-    if "val" in s or "valid" in s:
-        score += 4
+    if "/100k/train" in s or s.endswith("/train"):
+        score += 6
+    if "/100k/val" in s or s.endswith("/val") or "/valid" in s:
+        score += 6
     if "detect" in s or "det_" in s or "labels_images" in s:
         score += 3
     if "lane" in s or "seg" in s or "drivable" in s:
@@ -145,61 +69,114 @@ def _score_json_candidate(path: Path) -> int:
     return score
 
 
+def _extract_object_labels(record: dict) -> List[dict]:
+    if isinstance(record.get("labels"), list):
+        return [x for x in record.get("labels", []) if isinstance(x, dict)]
+    frames = record.get("frames")
+    if isinstance(frames, list) and frames:
+        first = frames[0]
+        if isinstance(first, dict) and isinstance(first.get("objects"), list):
+            return [x for x in first.get("objects", []) if isinstance(x, dict)]
+    if isinstance(record.get("objects"), list):
+        return [x for x in record.get("objects", []) if isinstance(x, dict)]
+    return []
+
+
+def _record_name(record: dict, src_path: Optional[Path] = None) -> str:
+    name = record.get("name")
+    if isinstance(name, str) and name:
+        return name
+    if src_path is not None:
+        return src_path.with_suffix(".jpg").name
+    return "unknown.jpg"
+
+
+def _canonical_vehicle_category(cat: object) -> Optional[str]:
+    if not isinstance(cat, str):
+        return None
+    key = cat.strip().lower().replace("_", " ")
+    key = key.split("/")[-1]
+    key = key.replace(" ", "") if key in {"road curb", "traffic light", "traffic sign"} else key
+    key = {
+        "roadcurb": "road curb",
+    }.get(key, key)
+    return CATEGORY_ALIASES.get(key)
+
+
+def _record_has_detection_objects(record: dict) -> bool:
+    labels = _extract_object_labels(record)
+    for obj in labels[:200]:
+        if _canonical_vehicle_category(obj.get("category")) is not None:
+            return True
+        if isinstance(obj.get("box2d"), dict):
+            return True
+    return False
+
+
 def _classify_json_by_content(path: Path) -> Optional[str]:
     try:
-        data = _load_json(path)
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
     except Exception:
         return None
 
     if isinstance(data, dict):
-        return "detection" if _has_detection_content(data) else None
-    if isinstance(data, list) and data and isinstance(data[0], dict):
-        return "detection" if _has_detection_content(data[0]) else None
+        return "detection" if _record_has_detection_objects(data) else None
+
+    if isinstance(data, list) and data:
+        sample = data[0]
+        if isinstance(sample, dict) and _record_has_detection_objects(sample):
+            return "detection"
     return None
+
+
+def _dir_looks_like_detection_json_dir(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    if path.name.lower() not in {"train", "val", "valid", "validation", "test"}:
+        return False
+    jsons = sorted(path.glob("*.json"))
+    if len(jsons) < 10:
+        return False
+    for p in jsons[:10]:
+        if _classify_json_by_content(p) == "detection":
+            return True
+    return False
 
 
 def locate_detection_jsons(raw_root: str | Path) -> Tuple[Path, Path]:
     raw_root = Path(raw_root)
 
-    preferred_train_dirs = [
-        raw_root / "100k" / "train",
-        raw_root / "bdd100k" / "100k" / "train",
-    ]
-    preferred_val_dirs = [
-        raw_root / "100k" / "val",
-        raw_root / "bdd100k" / "100k" / "val",
-    ]
-
-    train_dir = next((p for p in preferred_train_dirs if p.is_dir() and _classify_source(p) == "detection"), None)
-    val_dir = next((p for p in preferred_val_dirs if p.is_dir() and _classify_source(p) == "detection"), None)
-    if train_dir and val_dir:
+    # Prefer per-image JSON directories, which is the actual structure in the user's BDD labels zip.
+    dir_candidates = [p for p in raw_root.rglob("*") if _dir_looks_like_detection_json_dir(p)]
+    train_dirs = [p for p in dir_candidates if "/train" in _norm_path_str(p)]
+    val_dirs = [p for p in dir_candidates if "/val" in _norm_path_str(p) or "/valid" in _norm_path_str(p)]
+    if train_dirs and val_dirs:
+        train_dir = sorted(train_dirs, key=lambda p: (-_score_json_candidate(p), str(p)))[0]
+        val_dir = sorted(val_dirs, key=lambda p: (-_score_json_candidate(p), str(p)))[0]
         return train_dir, val_dir
 
-    det_sources: List[Path] = []
-    for p in sorted(raw_root.rglob("*")):
-        if not (p.is_file() and p.suffix.lower()==".json") and not p.is_dir():
-            continue
-        if p.is_dir() and p.name not in {"train", "val", "test"}:
-            continue
-        if _classify_source(p) == "detection":
-            det_sources.append(p)
+    det_jsons: List[Path] = []
+    for p in _find_all_jsons(raw_root):
+        if _classify_json_by_content(p) == "detection":
+            det_jsons.append(p)
 
-    if not det_sources:
+    if not det_jsons:
         raise FileNotFoundError(f"No detection-style JSONs found under {raw_root}")
 
-    train_candidates = [p for p in det_sources if "train" in _norm_path_str(p)]
-    val_candidates = [p for p in det_sources if "val" in _norm_path_str(p) or "valid" in _norm_path_str(p)]
+    train_candidates = [p for p in det_jsons if "train" in _norm_path_str(p)]
+    val_candidates = [p for p in det_jsons if "val" in _norm_path_str(p) or "valid" in _norm_path_str(p)]
 
     if not train_candidates:
-        train_candidates = det_sources
+        train_candidates = det_jsons
     if not val_candidates:
-        val_candidates = det_sources
+        val_candidates = det_jsons
 
     train_json = sorted(train_candidates, key=lambda p: (-_score_json_candidate(p), str(p)))[0]
     val_json = sorted(val_candidates, key=lambda p: (-_score_json_candidate(p), str(p)))[0]
 
     if train_json == val_json:
-        for p in det_sources:
+        for p in det_jsons:
             s = _norm_path_str(p)
             if p != train_json and ("val" in s or "valid" in s):
                 val_json = p
@@ -207,55 +184,64 @@ def locate_detection_jsons(raw_root: str | Path) -> Tuple[Path, Path]:
 
     if train_json == val_json:
         raise FileNotFoundError(
-            "Found detection sources but could not distinguish train and val. "
-            f"Candidates: {[str(p) for p in det_sources[:10]]}"
+            "Found detection JSONs but could not distinguish train and val. "
+            f"Candidates: {[str(p) for p in det_jsons[:10]]}"
         )
     return train_json, val_json
 
 
+def _has_images(path: Path) -> bool:
+    if not path.is_dir():
+        return False
+    for p in path.iterdir():
+        if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES:
+            return True
+    return False
+
+
 def locate_image_dirs(raw_root: str | Path) -> Tuple[Path, Path]:
     raw_root = Path(raw_root)
+    train_candidates: List[Path] = []
+    val_candidates: List[Path] = []
 
-    preferred_train = [
-        raw_root / "bdd100k" / "images" / "100k" / "train",
-        raw_root / "images" / "100k" / "train",
-        raw_root / "100k" / "train",
-    ]
-    preferred_val = [
-        raw_root / "bdd100k" / "images" / "100k" / "val",
-        raw_root / "images" / "100k" / "val",
-        raw_root / "100k" / "val",
-    ]
-    train_dir = next((p for p in preferred_train if p.is_dir() and any(x.suffix.lower() in IMAGE_SUFFIXES for x in p.iterdir() if x.is_file())), None)
-    val_dir = next((p for p in preferred_val if p.is_dir() and any(x.suffix.lower() in IMAGE_SUFFIXES for x in p.iterdir() if x.is_file())), None)
-    if train_dir and val_dir:
-        return train_dir, val_dir
-
-    train_dir = None
-    val_dir = None
     for p in raw_root.rglob("*"):
-        if not p.is_dir():
+        if not p.is_dir() or not _has_images(p):
             continue
         s = _norm_path_str(p)
-        has_images = any(x.suffix.lower() in IMAGE_SUFFIXES for x in p.iterdir() if x.is_file())
-        if not has_images:
+        # Prefer official image layouts and avoid JSON label directories.
+        score = 0
+        if "/images/100k/train" in s:
+            score = 10
+        elif "/images/100k/val" in s:
+            score = 10
+        elif "/100k/images/train" in s or "/100k/images/val" in s:
+            score = 9
+        elif "/images/train" in s or "/images/val" in s:
+            score = 8
+        elif s.endswith("/train") or s.endswith("/val"):
+            score = 4
+        if score <= 0:
             continue
-        if train_dir is None and s.endswith("/train") and ("/images/" in s or "/100k/train" in s):
-            train_dir = p
-        if val_dir is None and s.endswith("/val") and ("/images/" in s or "/100k/val" in s):
-            val_dir = p
+        if "/train" in s:
+            train_candidates.append((score, p))
+        if "/val" in s or "/valid" in s:
+            val_candidates.append((score, p))
 
-    if train_dir is None or val_dir is None:
+    if not train_candidates or not val_candidates:
         raise FileNotFoundError(f"Could not locate image train/val directories under {raw_root}")
 
+    train_dir = sorted(train_candidates, key=lambda x: (-x[0], str(x[1])))[0][1]
+    val_dir = sorted(val_candidates, key=lambda x: (-x[0], str(x[1])))[0][1]
     return train_dir, val_dir
 
 
 def locate_lane_json(raw_root: str | Path) -> Optional[Path]:
     raw_root = Path(raw_root)
-    for p in [raw_root / "100k" / "train", raw_root / "bdd100k" / "100k" / "train"]:
-        if p.is_dir():
-            return p
+    # Prefer per-image JSON directory structure used by the user's labels zip.
+    for rel in [Path("100k/train"), Path("bdd100k/100k/train")]:
+        cand = raw_root / rel
+        if cand.is_dir() and len(list(cand.glob("*.json"))) > 10:
+            return cand
     candidates: List[Path] = []
     for p in raw_root.rglob("*.json"):
         s = _norm_path_str(p)
@@ -268,13 +254,25 @@ def locate_lane_json(raw_root: str | Path) -> Optional[Path]:
 
 def locate_seg_maps_root(raw_root: str | Path) -> Optional[Path]:
     raw_root = Path(raw_root)
+    best: Optional[Path] = None
+    best_score = -1
     for p in raw_root.rglob("*"):
         if not p.is_dir():
             continue
         s = _norm_path_str(p)
-        if "/seg/" in s or "seg_maps" in s or (s.endswith("/train") and "labels" in s):
-            return p
-    return None
+        score = 0
+        if "/color_labels/train" in s:
+            score = 10
+        elif "/color_labels" in s:
+            score = 8
+        elif "seg_maps" in s:
+            score = 7
+        elif "/seg/" in s:
+            score = 6
+        if score > best_score:
+            best = p
+            best_score = score
+    return best
 
 
 def _extract_xywh(obj: dict) -> Optional[Tuple[float, float, float, float]]:
@@ -297,6 +295,32 @@ def _extract_xywh(obj: dict) -> Optional[Tuple[float, float, float, float]]:
     return xc, yc, w, h
 
 
+def _iter_records_from_source(source: str | Path) -> Iterator[Tuple[dict, Optional[Path]]]:
+    source = Path(source)
+    if source.is_dir():
+        for p in sorted(source.glob("*.json")):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                yield data, p
+            elif isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        yield item, p
+        return
+    with open(source, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, dict):
+        yield data, source
+    elif isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                yield item, source
+
+
 def convert_detection_json_to_vehicle_yolo(json_path: str | Path, labels_out: str | Path) -> Dict[str, int]:
     labels_out = ensure_dir(labels_out)
 
@@ -312,8 +336,8 @@ def convert_detection_json_to_vehicle_yolo(json_path: str | Path, labels_out: st
         rows: List[str] = []
 
         for lab in labels:
-            cat = lab.get("category")
-            if cat not in VEHICLE_TO_ID:
+            cat = _canonical_vehicle_category(lab.get("category"))
+            if cat is None or cat not in VEHICLE_TO_ID:
                 continue
             box = _extract_xywh(lab)
             if box is None:
