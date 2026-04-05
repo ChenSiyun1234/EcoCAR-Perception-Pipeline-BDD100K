@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .config import BDD_IMG_W, BDD_IMG_H
+
 import json
 import os
 import shutil
