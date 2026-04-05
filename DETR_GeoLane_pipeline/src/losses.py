@@ -12,6 +12,7 @@ This makes optimization much less brittle early in training while keeping the
 structured polyline representation.
 """
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -376,6 +377,32 @@ def aggregate_lane_mask(points: torch.Tensor,
     return out
 
 
+class LaneLossScheduler:
+    def __init__(self, cfg):
+        self.total_epochs = max(int(getattr(cfg, 'epochs', 50)), 1)
+        self.geom_start = float(getattr(cfg, 'lane_geom_warmup_scale', 0.70))
+        self.geom_end = float(getattr(cfg, 'lane_geom_final_scale', 1.00))
+        self.raster_start = float(getattr(cfg, 'lane_raster_start_scale', 1.00))
+        self.raster_end = float(getattr(cfg, 'lane_raster_final_scale', 0.15))
+        self.start_ratio = float(getattr(cfg, 'lane_schedule_start_ratio', 0.25))
+        self.end_ratio = float(getattr(cfg, 'lane_schedule_end_ratio', 0.75))
+
+    def _cosine_interp(self, a: float, b: float, t: float) -> float:
+        t = 0.5 * (1.0 - math.cos(math.pi * max(0.0, min(1.0, t))))
+        return a + (b - a) * t
+
+    def get(self, epoch: int) -> tuple[float, float]:
+        if self.total_epochs <= 1:
+            return self.geom_end, self.raster_end
+        x = epoch / float(self.total_epochs - 1)
+        if x <= self.start_ratio:
+            return self.geom_start, self.raster_start
+        if x >= self.end_ratio:
+            return self.geom_end, self.raster_end
+        t = (x - self.start_ratio) / max(self.end_ratio - self.start_ratio, 1e-8)
+        return self._cosine_interp(self.geom_start, self.geom_end, t), self._cosine_interp(self.raster_start, self.raster_end, t)
+
+
 class DetectionLoss(nn.Module):
     def __init__(self, num_classes: int, cls_weight: float = 2.0,
                  l1_weight: float = 5.0, giou_weight: float = 2.0):
@@ -485,6 +512,12 @@ class LaneLoss(nn.Module):
         self.raster_w = raster_w
         self.raster_thickness = raster_thickness
         self._grid_cache = {}
+        self.geom_runtime_scale = 1.0
+        self.raster_runtime_scale = 1.0
+
+    def set_runtime_scales(self, geom_scale: float = 1.0, raster_scale: float = 1.0):
+        self.geom_runtime_scale = float(geom_scale)
+        self.raster_runtime_scale = float(raster_scale)
 
     def _get_raster_grid(self, device, dtype) -> torch.Tensor:
         key = (device.type, device.index, str(dtype), self.raster_h, self.raster_w)
@@ -638,10 +671,10 @@ class LaneLoss(nn.Module):
         vis_loss = total_vis_loss / n
         total = (
             self.exist_weight * exist_loss +
-            self.pts_weight * curve_loss +
-            self.tangent_weight * tangent_loss +
-            self.curvature_weight * curvature_loss +
-            self.overlap_weight * overlap_loss +
+            self.geom_runtime_scale * self.pts_weight * curve_loss +
+            self.geom_runtime_scale * self.tangent_weight * tangent_loss +
+            self.geom_runtime_scale * self.curvature_weight * curvature_loss +
+            self.raster_runtime_scale * self.overlap_weight * overlap_loss +
             self.type_weight * type_loss +
             0.5 * vis_loss
         )
@@ -653,6 +686,8 @@ class LaneLoss(nn.Module):
             'lane_overlap': float(overlap_loss.item()),
             'lane_type': float(type_loss.item()),
             'lane_vis': float(vis_loss.item()),
+            'lane_geom_runtime_scale': float(self.geom_runtime_scale),
+            'lane_raster_runtime_scale': float(self.raster_runtime_scale),
         }
 
     def forward(self, outputs: dict,
@@ -701,6 +736,11 @@ class DualPathLoss(nn.Module):
         )
         self.det_weight = cfg.det_task_weight
         self.lane_weight = cfg.lane_task_weight
+        self.lane_scheduler = LaneLossScheduler(cfg)
+
+    def set_epoch(self, epoch: int):
+        geom_scale, raster_scale = self.lane_scheduler.get(epoch)
+        self.lane_loss.set_runtime_scales(geom_scale=geom_scale, raster_scale=raster_scale)
 
     def forward(self, outputs: dict, batch: dict) -> Tuple[torch.Tensor, dict]:
         det_gt = self._prepare_det_gt(outputs, batch)

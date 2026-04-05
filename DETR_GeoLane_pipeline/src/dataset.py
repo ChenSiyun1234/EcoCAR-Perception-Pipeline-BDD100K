@@ -1,8 +1,11 @@
+
 """
 BDD100K dataset for dual-path training.
 
-Reuses the existing YOLO-format detection labels from the old pipeline's
-Drive layout. Adds structured lane targets parsed from BDD100K poly2d.
+Supports both original BDD class ids and already-remapped YOLO vehicle ids.
+This is important because many previous YOLO26 pipelines already rewrote labels
+to vehicle-only ids [0..4], and interpreting those as original BDD ids silently
+drops valid motorcycle/bicycle labels.
 """
 
 import os
@@ -15,22 +18,13 @@ from typing import Dict, List, Optional, Tuple
 from .config import Config, BDD_TO_VEHICLE, BDD_TO_EXPANDED
 from .lane_targets import LaneLabelCache
 
-
 _VEHICLE_IDENTITY = {i: i for i in range(5)}
 _EXPANDED_IDENTITY = {i: i for i in range(7)}
 
-
 def infer_label_schema(labels_dir: str, use_expanded_classes: bool = False, max_files: int = 256) -> str:
-    """
-    Infer whether YOLO txt labels use:
-      - original BDD100K IDs (e.g. 2,3,4,6,7)
-      - already-remapped vehicle IDs (0..4)
-      - already-remapped expanded IDs (0..6)
-    """
     txt_files = sorted([f for f in os.listdir(labels_dir) if f.endswith('.txt')])[:max_files]
     if not txt_files:
         return 'bdd_original'
-
     observed = set()
     for fname in txt_files:
         path = os.path.join(labels_dir, fname)
@@ -50,26 +44,19 @@ def infer_label_schema(labels_dir: str, use_expanded_classes: bool = False, max_
             continue
         if len(observed) >= 16:
             break
-
     if not observed:
-        return 'bdd_original'
-
-    if observed.issubset(set(BDD_TO_EXPANDED.keys())) and max(observed) > 6:
         return 'bdd_original'
     if use_expanded_classes and observed.issubset(set(_EXPANDED_IDENTITY.keys())):
         return 'expanded_remapped'
     if (not use_expanded_classes) and observed.issubset(set(_VEHICLE_IDENTITY.keys())):
         return 'vehicle_remapped'
-    if observed.issubset(set(BDD_TO_VEHICLE.keys())):
+    if observed.issubset(set(BDD_TO_VEHICLE.keys())) or observed.issubset(set(BDD_TO_EXPANDED.keys())):
         return 'bdd_original'
-    if observed.issubset(set(BDD_TO_EXPANDED.keys())):
-        return 'bdd_original'
-    if max(observed) <= 4:
+    if max(observed) <= 4 and not use_expanded_classes:
         return 'vehicle_remapped'
-    if use_expanded_classes and max(observed) <= 6:
+    if max(observed) <= 6 and use_expanded_classes:
         return 'expanded_remapped'
     return 'bdd_original'
-
 
 class BDD100KDualDataset(Dataset):
     def __init__(self, images_dir: str, labels_dir: str,
@@ -89,10 +76,7 @@ class BDD100KDualDataset(Dataset):
         self.augment = augment
         self.use_expanded_classes = use_expanded_classes
 
-        self.image_files = sorted([
-            f for f in os.listdir(images_dir)
-            if f.lower().endswith((".jpg", ".jpeg", ".png"))
-        ])
+        self.image_files = sorted([f for f in os.listdir(images_dir) if f.lower().endswith((".jpg", ".jpeg", ".png"))])
         print(f"  Dataset: {len(self.image_files)} images from {images_dir}")
 
         if label_schema == 'auto':
@@ -103,8 +87,32 @@ class BDD100KDualDataset(Dataset):
         else:
             self.class_map = BDD_TO_VEHICLE if label_schema == 'bdd_original' else _VEHICLE_IDENTITY
         print(f"  Detection label schema: {self.label_schema}")
+        self._print_label_histogram()
 
-    def __len__(self):
+    def _print_label_histogram(self, max_files: int = 512):
+        counts = {int(k): 0 for k in sorted(set(self.class_map.values()))}
+        txt_files = sorted([f for f in os.listdir(self.labels_dir) if f.endswith('.txt')])[:max_files]
+        for fname in txt_files:
+            path = os.path.join(self.labels_dir, fname)
+            try:
+                with open(path, 'r') as f:
+                    for line in f:
+                        parts = line.strip().split()
+                        if len(parts) < 5:
+                            continue
+                        try:
+                            raw_cls = int(float(parts[0]))
+                        except Exception:
+                            continue
+                        if raw_cls in self.class_map:
+                            counts[int(self.class_map[raw_cls])] = counts.get(int(self.class_map[raw_cls]), 0) + 1
+            except Exception:
+                continue
+        if counts:
+            human = [f"{k}:{v}" for k, v in sorted(counts.items())]
+            print("  Sampled detection class counts -> " + ", ".join(human))
+
+    def __len__(self) -> int:
         return len(self.image_files)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
@@ -125,11 +133,7 @@ class BDD100KDualDataset(Dataset):
         label_path = os.path.join(self.labels_dir, stem + '.txt')
         det_targets = self._load_det_labels(label_path)
 
-        if self.lane_cache is not None:
-            lane_targets = self.lane_cache.get(fname)
-        else:
-            lane_targets = None
-
+        lane_targets = self.lane_cache.get(fname) if self.lane_cache is not None else None
         if lane_targets is None:
             lane_targets = {
                 'existence': np.zeros(self.max_lanes, dtype=np.float32),
@@ -161,7 +165,6 @@ class BDD100KDualDataset(Dataset):
     def _load_det_labels(self, path: str) -> np.ndarray:
         if not os.path.isfile(path):
             return np.zeros((0, 5), dtype=np.float32)
-
         labels = []
         with open(path, 'r') as f:
             for line in f:
@@ -176,11 +179,12 @@ class BDD100KDualDataset(Dataset):
                     continue
                 mapped_cls = self.class_map[raw_cls]
                 cx, cy, w, h = float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
+                if w <= 0.0 or h <= 0.0:
+                    continue
                 labels.append([mapped_cls, cx, cy, w, h])
         if not labels:
             return np.zeros((0, 5), dtype=np.float32)
         return np.asarray(labels, dtype=np.float32)
-
 
 def dual_collate_fn(batch: List[dict]) -> dict:
     images = torch.stack([b['image'] for b in batch])
@@ -201,14 +205,12 @@ def dual_collate_fn(batch: List[dict]) -> dict:
         'has_lanes': torch.stack([b['has_lanes'] for b in batch]),
     }
 
-
-def build_dataloaders(cfg: Config,
-                      train_lane_json: Optional[str] = None,
-                      val_lane_json: Optional[str] = None) -> Tuple[DataLoader, DataLoader]:
+def build_dataloaders(cfg: Config, train_lane_json: Optional[str] = None, val_lane_json: Optional[str] = None) -> Tuple[DataLoader, DataLoader]:
     root = cfg.dataset_root
     train_lane_cache = LaneLabelCache(train_lane_json, cfg.max_lanes, cfg.lane_points) if train_lane_json else None
     val_lane_cache = LaneLabelCache(val_lane_json, cfg.max_lanes, cfg.lane_points) if val_lane_json else None
 
+    label_schema = getattr(cfg, 'label_schema', 'auto')
     train_ds = BDD100KDualDataset(
         images_dir=os.path.join(root, 'images', 'train'),
         labels_dir=os.path.join(root, 'labels', 'train'),
@@ -217,9 +219,10 @@ def build_dataloaders(cfg: Config,
         max_lanes=cfg.max_lanes,
         lane_points=cfg.lane_points,
         use_expanded_classes=cfg.use_expanded_classes,
-        label_schema=getattr(cfg, 'label_schema', 'auto'),
+        label_schema=label_schema,
         augment=True,
     )
+    val_schema = train_ds.label_schema if label_schema == 'auto' else label_schema
     val_ds = BDD100KDualDataset(
         images_dir=os.path.join(root, 'images', 'val'),
         labels_dir=os.path.join(root, 'labels', 'val'),
@@ -228,18 +231,10 @@ def build_dataloaders(cfg: Config,
         max_lanes=cfg.max_lanes,
         lane_points=cfg.lane_points,
         use_expanded_classes=cfg.use_expanded_classes,
-        label_schema=getattr(cfg, 'label_schema', 'auto'),
+        label_schema=val_schema,
         augment=False,
     )
 
-    train_loader = DataLoader(
-        train_ds, batch_size=cfg.batch_size, shuffle=True,
-        num_workers=cfg.num_workers, collate_fn=dual_collate_fn,
-        pin_memory=True, drop_last=True, persistent_workers=cfg.num_workers > 0,
-    )
-    val_loader = DataLoader(
-        val_ds, batch_size=cfg.batch_size, shuffle=False,
-        num_workers=cfg.num_workers, collate_fn=dual_collate_fn,
-        pin_memory=True, persistent_workers=cfg.num_workers > 0,
-    )
+    train_loader = DataLoader(train_ds, batch_size=cfg.batch_size, shuffle=True, num_workers=cfg.num_workers, collate_fn=dual_collate_fn, pin_memory=True, drop_last=True, persistent_workers=cfg.num_workers > 0)
+    val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False, num_workers=cfg.num_workers, collate_fn=dual_collate_fn, pin_memory=True, persistent_workers=cfg.num_workers > 0)
     return train_loader, val_loader

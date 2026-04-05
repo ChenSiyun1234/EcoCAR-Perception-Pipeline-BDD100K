@@ -11,6 +11,7 @@ from .encoder import HybridEncoder
 from .detection_head import DetectionHead, inverse_sigmoid
 from .lane_head import LaneHead
 from .config import Config, NUM_CLASSES, NUM_LANE_TYPES
+from .segmentation_head import LightweightSegmentationHead
 
 
 class CrossBranchAttention(nn.Module):
@@ -44,6 +45,7 @@ class DualPathNet(nn.Module):
         self.det_head = DetectionHead(num_classes=nc, d_model=cfg.det_dim, nhead=cfg.det_nhead, ffn_dim=cfg.det_ffn_dim, num_layers=cfg.det_dec_layers, num_queries=cfg.det_num_queries, dropout=cfg.det_dropout)
         self.lane_head = LaneHead(num_lane_types=NUM_LANE_TYPES, num_points=cfg.lane_points, d_model=cfg.lane_dim, nhead=cfg.lane_nhead, ffn_dim=cfg.lane_ffn_dim, num_layers=cfg.lane_dec_layers, num_queries=cfg.lane_num_queries, dropout=cfg.lane_dropout)
         self.cross_attn = None
+        self.seg_head = LightweightSegmentationHead(in_channels=cfg.fpn_channels, hidden_dim=cfg.seg_hidden_dim, num_prototypes=cfg.seg_num_prototypes, mask_dim=cfg.seg_mask_dim) if getattr(cfg, 'enable_segmentation', False) else None
         if cfg.cross_attn and cfg.det_dim == cfg.lane_dim:
             self.cross_attn = CrossBranchAttention(d_model=cfg.det_dim, nhead=cfg.det_nhead, num_layers=cfg.cross_attn_layers)
         self._arch_config = {
@@ -82,7 +84,11 @@ class DualPathNet(nn.Module):
             lane_out["vis_logits"] = lane_vis
             lane_out["type_logits"] = lane_type
 
-        return {**{f"det_{k}": v for k, v in det_out.items()}, **{f"lane_{k}": v for k, v in lane_out.items()}}
+        merged = {**{f"det_{k}": v for k, v in det_out.items()}, **{f"lane_{k}": v for k, v in lane_out.items()}}
+        if self.seg_head is not None:
+            seg_out = self.seg_head(fpn_features[0], det_out["query_features"])
+            merged.update(seg_out)
+        return merged
 
     def print_summary(self):
         bb = sum(p.numel() for p in self.backbone.parameters())
@@ -91,6 +97,7 @@ class DualPathNet(nn.Module):
         le = sum(p.numel() for p in self.lane_encoder.parameters())
         lh = sum(p.numel() for p in self.lane_head.parameters())
         ca = sum(p.numel() for p in self.cross_attn.parameters()) if self.cross_attn else 0
+        sh = sum(p.numel() for p in self.seg_head.parameters()) if self.seg_head else 0
         total = sum(p.numel() for p in self.parameters())
         print("DualPathNet summary:")
         print(f"  Backbone+FPN : {bb:>12,}")
@@ -100,6 +107,8 @@ class DualPathNet(nn.Module):
         print(f"  Lane decoder : {lh:>12,}")
         if ca:
             print(f"  Cross-attn   : {ca:>12,}")
+        if sh:
+            print(f"  Seg head     : {sh:>12,}")
         print(f"  Total        : {total:>12,}")
         print(f"  Det queries={self.cfg.det_num_queries}, Lane queries={self.cfg.lane_num_queries}, Lane points={self.cfg.lane_points}")
 

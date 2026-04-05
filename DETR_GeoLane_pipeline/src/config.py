@@ -108,6 +108,20 @@ class Config:
     lane_raster_h: int = 72
     lane_raster_w: int = 128
     lane_raster_thickness: float = 0.03
+
+    # Lane loss curriculum
+    lane_geom_warmup_scale: float = 0.70
+    lane_geom_final_scale: float = 1.00
+    lane_raster_start_scale: float = 1.00
+    lane_raster_final_scale: float = 0.15
+    lane_schedule_start_ratio: float = 0.25
+    lane_schedule_end_ratio: float = 0.75
+    # Optional lightweight instance segmentation branch
+    enable_segmentation: bool = False
+    seg_num_prototypes: int = 32
+    seg_mask_dim: int = 32
+    seg_hidden_dim: int = 128
+    seg_mask_weight: float = 1.0
     conf_thresh: float = 0.3
     nms_iou: float = 0.5
     lane_match_thresh: float = 15.0
