@@ -67,7 +67,7 @@ class Config:
     dataset_root: str = LOCAL_DATASET
     img_size: int = 640
     batch_size: int = 8
-    num_workers: int = 8
+    num_workers: int = 4
     max_lanes: int = 10
     lane_points: int = 72
     use_expanded_classes: bool = False
@@ -88,8 +88,11 @@ class Config:
     lane_nhead: int = 8
     lane_ffn_dim: int = 1024
     lane_dropout: float = 0.0
+    use_task_adapters: bool = True
+    adapter_hidden_ratio: float = 0.5
     cross_attn: bool = True
     cross_attn_layers: int = 1
+    cross_attn_start_epoch: int = 8
     lr: float = 1e-4
     backbone_lr_scale: float = 0.1
     weight_decay: float = 1e-4
@@ -122,17 +125,19 @@ class Config:
     seg_mask_dim: int = 32
     seg_hidden_dim: int = 128
     seg_mask_weight: float = 1.0
-    conf_thresh: float = 0.4
+    conf_thresh: float = 0.3
     nms_iou: float = 0.5
     lane_match_thresh: float = 15.0
     label_schema: str = "auto"
     auto_resume: bool = True
     resume_path: str = ""
-    val_interval: int = 5
-    max_val_batches: int = 250
+    val_interval: int = 1
+    max_val_batches: int = 0
     det_task_warmup_weight: float = 1.0
     lane_task_warmup_weight: float = 0.35
     task_warmup_epochs: int = 8
+    det_only_epochs: int = 3
+    freeze_backbone_epochs: int = 0
     save_dir: str = ""
     patience: int = 15
 

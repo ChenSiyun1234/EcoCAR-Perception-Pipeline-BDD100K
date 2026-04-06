@@ -119,17 +119,29 @@ class Trainer:
 
     def _set_task_weights(self, epoch: int):
         warm_epochs = max(int(getattr(self.cfg, 'task_warmup_epochs', 0)), 0)
-        if epoch < warm_epochs:
+        det_only_epochs = max(int(getattr(self.cfg, 'det_only_epochs', 0)), 0)
+        if epoch < det_only_epochs:
+            self.criterion.det_weight = float(getattr(self.cfg, 'det_task_warmup_weight', self.cfg.det_task_weight))
+            self.criterion.lane_weight = 0.0
+        elif epoch < warm_epochs:
             self.criterion.det_weight = float(getattr(self.cfg, 'det_task_warmup_weight', self.cfg.det_task_weight))
             self.criterion.lane_weight = float(getattr(self.cfg, 'lane_task_warmup_weight', self.cfg.lane_task_weight))
         else:
             self.criterion.det_weight = float(self.cfg.det_task_weight)
             self.criterion.lane_weight = float(self.cfg.lane_task_weight)
+
+        freeze_backbone_epochs = max(int(getattr(self.cfg, 'freeze_backbone_epochs', 0)), 0)
+        backbone_trainable = epoch >= freeze_backbone_epochs
+        for name, p in self.model.named_parameters():
+            if 'backbone' in name:
+                p.requires_grad = backbone_trainable
         self.criterion.set_epoch(epoch)
 
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
         self._set_task_weights(epoch)
+        if hasattr(self.model, 'set_epoch'):
+            self.model.set_epoch(epoch)
         totals = {}
         n = 0
         for batch in self.train_loader:
@@ -183,11 +195,7 @@ class Trainer:
                 probs = pred_logits[bi].softmax(dim=-1)
                 scores, labels = probs[:, :-1].max(dim=-1)
                 keep = scores > self.cfg.conf_thresh
-                keep_idx = torch.where(keep)[0]
-                if keep_idx.numel() > 150:
-                    topk = scores[keep_idx].topk(150).indices
-                    keep_idx = keep_idx[topk]
-                pred_xyxy = box_cxcywh_to_xyxy(pred_boxes[bi, keep_idx]) * self.cfg.img_size
+                pred_xyxy = box_cxcywh_to_xyxy(pred_boxes[bi, keep]) * self.cfg.img_size
                 if det_targets.shape[0] > 0:
                     mask = det_targets[:, 0] == bi
                     tgt = det_targets[mask]
@@ -200,7 +208,7 @@ class Trainer:
                 else:
                     gt_xyxy = torch.empty((0, 4), device=self.device)
                     gt_cls = torch.empty(0, dtype=torch.long, device=self.device)
-                self.det_metrics.update(pred_xyxy, scores[keep_idx], labels[keep_idx], gt_xyxy, gt_cls)
+                self.det_metrics.update(pred_xyxy, scores[keep], labels[keep], gt_xyxy, gt_cls)
             has_lane_mask = batch_gpu['has_lanes'] > 0.5
             if has_lane_mask.any():
                 for bi in torch.where(has_lane_mask)[0].tolist():
