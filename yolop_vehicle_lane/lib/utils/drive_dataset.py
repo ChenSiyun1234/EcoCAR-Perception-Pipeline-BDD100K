@@ -19,15 +19,22 @@ except Exception:  # pragma: no cover
 
 
 def _read_paths_config(ecocar_root: str) -> dict:
-    cfg_path = os.path.join(ecocar_root, 'paths_config.yaml')
-    if not os.path.isfile(cfg_path) or yaml is None:
-        return {}
-    try:
-        with open(cfg_path, 'r', encoding='utf-8') as f:
-            data = yaml.safe_load(f) or {}
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    candidate_paths = []
+    if ecocar_root:
+        candidate_paths.append(os.path.join(ecocar_root, 'paths_config.yaml'))
+        parent = str(Path(ecocar_root).parent)
+        if parent and parent != ecocar_root:
+            candidate_paths.append(os.path.join(parent, 'paths_config.yaml'))
+    for cfg_path in candidate_paths:
+        if not os.path.isfile(cfg_path) or yaml is None:
+            continue
+        try:
+            with open(cfg_path, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f) or {}
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            continue
+    return {}
 
 
 def _normalize_lane_candidates(lane_dir_candidates: Optional[Iterable[str]]) -> List[str]:
@@ -186,34 +193,54 @@ def find_raw_bdd_root(ecocar_root: str, auto_extract: bool = True) -> str:
         if isinstance(v, str) and v.strip():
             candidates.append(v)
 
+    project_root = Path(ecocar_root)
+    shared_root = project_root.parent if project_root.name == 'yolop_vehicle_lane' else project_root
+
     candidates += [
         os.path.join(ecocar_root, 'datasets', 'bdd100k_raw'),
         os.path.join(ecocar_root, 'bdd100k_raw'),
+        os.path.join(str(shared_root), 'datasets', 'bdd100k_raw'),
+        os.path.join(str(shared_root), 'bdd100k_raw'),
+        os.path.join(str(shared_root), 'downloads', 'bdd100k_raw'),
         '/content/bdd100k_raw',
         '/content/bdd100k',
     ]
 
+    ordered_candidates = []
+    seen = set()
     for cand in candidates:
-        if cand and os.path.isdir(cand):
+        if cand and cand not in seen:
+            ordered_candidates.append(cand)
+            seen.add(cand)
+
+    for cand in ordered_candidates:
+        if not cand or not os.path.isdir(cand):
+            continue
+        laneish = [
+            os.path.join(cand, '100k'),
+            os.path.join(cand, 'labels', '100k'),
+            os.path.join(cand, 'bdd100k', '100k'),
+            os.path.join(cand, 'images', '100k'),
+        ]
+        if any(os.path.isdir(p) for p in laneish):
             return cand
 
     if auto_extract:
         raw_root = '/content/bdd100k_raw'
-        downloads = os.path.join(ecocar_root, 'downloads')
-        label_zip = os.path.join(downloads, 'bdd100k_labels.zip')
-        image_zip = os.path.join(downloads, 'bdd100k_images_100k.zip')
-        seg_zip = os.path.join(downloads, 'bdd100k_seg_maps.zip')
-
         extracted_any = False
-        extracted_any |= _extract_zip_if_needed(label_zip, raw_root)
-        extracted_any |= _extract_zip_if_needed(image_zip, raw_root)
-        if os.path.isfile(seg_zip):
-            _extract_zip_if_needed(seg_zip, raw_root)
+        for downloads in [os.path.join(ecocar_root, 'downloads'), os.path.join(str(shared_root), 'downloads')]:
+            label_zip = os.path.join(downloads, 'bdd100k_labels.zip')
+            image_zip = os.path.join(downloads, 'bdd100k_images_100k.zip')
+            seg_zip = os.path.join(downloads, 'bdd100k_seg_maps.zip')
+            extracted_any |= _extract_zip_if_needed(label_zip, raw_root)
+            extracted_any |= _extract_zip_if_needed(image_zip, raw_root)
+            if os.path.isfile(seg_zip):
+                _extract_zip_if_needed(seg_zip, raw_root)
 
         if extracted_any and os.path.isdir(raw_root):
             return raw_root
 
-    raise FileNotFoundError(f'Could not find raw BDD root. Tried: {candidates}')
+    raise FileNotFoundError(f'Could not find raw BDD root. Tried: {ordered_candidates}')
 
 
 def find_lane_polygon_jsons(raw_bdd_root: str):

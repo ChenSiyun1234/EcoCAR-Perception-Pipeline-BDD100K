@@ -2,6 +2,8 @@
 Lane mask rendering utilities.
 Migrated from yolo26_pipeline/src/lane_utils.py.
 Renders BDD100K poly2d lane annotations into binary segmentation masks.
+Supports both consolidated JSON files and the older per-image JSON directory
+layout used by the working DETR_GeoLane pipeline.
 """
 
 import json
@@ -12,6 +14,8 @@ from typing import Dict, List, Optional
 import cv2
 import numpy as np
 from tqdm import tqdm
+
+from .lane_targets import extract_lane_labels_any, parse_poly2d
 
 
 BDD_LANE_CATEGORIES = [
@@ -26,55 +30,49 @@ BDD_LANE_CATEGORIES = [
 ]
 
 
-def _poly2d_to_polygon_dicts(poly2d_data):
-    polygons = []
-    if poly2d_data is None:
-        return polygons
-    if isinstance(poly2d_data, dict):
-        return [poly2d_data]
-    if not isinstance(poly2d_data, list) or len(poly2d_data) == 0:
-        return polygons
-
-    first = poly2d_data[0]
-    if isinstance(first, dict):
-        return poly2d_data
-    if isinstance(first, (list, tuple)):
-        if len(first) >= 2 and isinstance(first[0], (int, float)):
-            return [{"vertices": poly2d_data}]
-        if len(first) > 0 and isinstance(first[0], (list, tuple)):
-            return [{"vertices": p} for p in poly2d_data if isinstance(p, list) and len(p) > 0]
-    return polygons
+def _record_image_name(record, fallback_json_path=None):
+    if not isinstance(record, dict):
+        if fallback_json_path:
+            return Path(fallback_json_path).stem + '.jpg'
+        return ''
+    for key in ['name', 'image', 'imageName', 'filename', 'id']:
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            base = os.path.basename(value)
+            if '.' not in base:
+                base += '.jpg'
+            return base
+    if fallback_json_path:
+        return Path(fallback_json_path).stem + '.jpg'
+    return ''
 
 
-def _normalize_vertices_and_types(poly):
-    if isinstance(poly, dict):
-        verts = poly.get("vertices", []) or []
-        types = poly.get("types", "") or ("L" * len(verts))
-    elif isinstance(poly, list):
-        verts = poly
-        types = "L" * len(verts)
-    else:
-        return [], ""
+def _iter_records_from_source(json_path: str):
+    if os.path.isdir(json_path):
+        json_files = sorted(str(p) for p in Path(json_path).glob('*.json'))
+        for jpath in json_files:
+            try:
+                with open(jpath, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            except Exception as exc:
+                yield ('__error__', jpath, exc)
+                continue
+            if isinstance(data, list):
+                for rec in data:
+                    if isinstance(rec, dict):
+                        yield (rec, jpath, None)
+            elif isinstance(data, dict):
+                yield (data, jpath, None)
+        return
 
-    out_verts = []
-    out_types = []
-    for v in verts:
-        if not isinstance(v, (list, tuple)) or len(v) < 2:
-            continue
-        try:
-            x = float(v[0]); y = float(v[1])
-        except Exception:
-            continue
-        out_verts.append([x, y])
-        if len(v) >= 3 and isinstance(v[2], str) and len(v[2]) > 0:
-            out_types.append(v[2][0])
-        else:
-            idx = len(out_verts) - 1
-            if idx < len(types) and isinstance(types[idx], str) and len(types[idx]) > 0:
-                out_types.append(types[idx][0])
-            else:
-                out_types.append("L")
-    return out_verts, "".join(out_types)
+    with open(json_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    if isinstance(data, list):
+        for rec in data:
+            if isinstance(rec, dict):
+                yield (rec, json_path, None)
+    elif isinstance(data, dict):
+        yield (data, json_path, None)
 
 
 def render_lane_mask(
@@ -87,25 +85,23 @@ def render_lane_mask(
 ) -> np.ndarray:
     """Render lane polylines as a binary mask."""
     mask = np.zeros((mask_height, mask_width), dtype=np.uint8)
-    sx = mask_width / img_width
-    sy = mask_height / img_height
+    sx = mask_width / float(img_width)
+    sy = mask_height / float(img_height)
 
     for label in labels:
-        cat = label.get("category", "")
-        if not isinstance(cat, str) or not cat.startswith("lane/"):
-            continue
-
-        for poly in _poly2d_to_polygon_dicts(label.get("poly2d")):
-            verts, _types = _normalize_vertices_and_types(poly)
+        geom_field = label.get('poly2d')
+        if geom_field is None and label.get('seg2d') is not None:
+            geom_field = label.get('seg2d')
+        for dense_pts in parse_poly2d(geom_field):
             pts = []
-            for v in verts:
-                x = int(round(v[0] * sx))
-                y = int(round(v[1] * sy))
+            for x0, y0 in dense_pts:
+                x = int(round(float(x0) * sx))
+                y = int(round(float(y0) * sy))
                 x = min(max(x, 0), mask_width - 1)
                 y = min(max(y, 0), mask_height - 1)
                 pts.append((x, y))
             if len(pts) >= 2:
-                cv2.polylines(mask, [np.array(pts, dtype=np.int32)], False, 255, line_thickness)
+                cv2.polylines(mask, [np.asarray(pts, dtype=np.int32)], False, 255, line_thickness)
 
     return mask
 
@@ -119,9 +115,14 @@ def convert_bdd_lanes_to_masks(
     img_height: int = 720,
     line_thickness: int = 3,
     debug_limit: Optional[int] = None,
+    overwrite: bool = True,
     **legacy_kwargs,
 ) -> Dict[str, int]:
-    """Convert all BDD100K lane labels from a JSON file to binary mask PNGs.
+    """Convert BDD100K lane labels to binary mask PNGs.
+
+    Accepts either:
+    - a consolidated JSON file (lane_train.json / lane_val.json)
+    - an old-style per-image JSON directory (100k/train / 100k/val)
 
     Backward-compatible aliases are accepted so older notebooks copied from
     earlier experiments still run:
@@ -146,33 +147,82 @@ def convert_bdd_lanes_to_masks(
         raise TypeError(f'Unexpected keyword arguments: {sorted(legacy_kwargs.keys())}')
 
     os.makedirs(output_mask_dir, exist_ok=True)
-    with open(json_path, "r") as f:
-        data = json.load(f)
-    if debug_limit is not None:
-        data = data[:debug_limit]
 
-    stats = {"total_images": len(data), "images_with_lanes": 0, "total_lane_annotations": 0}
-    for frame in tqdm(data, desc="Rendering lane masks"):
-        img_name = frame.get("name", "")
-        mask_name = Path(img_name).stem + ".png"
+    stats = {
+        'total_records_seen': 0,
+        'total_images': 0,
+        'images_with_lanes': 0,
+        'total_lane_annotations': 0,
+        'json_errors': 0,
+        'written_masks': 0,
+        'skipped_existing': 0,
+    }
+
+    debug_examples = []
+    iterator = _iter_records_from_source(json_path)
+    desc = 'Rendering lane masks from directory' if os.path.isdir(json_path) else 'Rendering lane masks from file'
+
+    for item, source_path, error in tqdm(iterator, desc=desc):
+        if item == '__error__':
+            stats['json_errors'] += 1
+            if len(debug_examples) < 3:
+                debug_examples.append({'source': source_path, 'error': str(error)})
+            continue
+
+        stats['total_records_seen'] += 1
+        if debug_limit is not None and stats['total_records_seen'] > int(debug_limit):
+            break
+
+        record = item
+        image_name = _record_image_name(record, source_path)
+        if not image_name:
+            continue
+
+        lane_labels = extract_lane_labels_any(record)
+        mask_name = Path(image_name).stem + '.png'
         mask_path = os.path.join(output_mask_dir, mask_name)
 
-        labels = frame.get("labels") or []
-        lane_labels = [l for l in labels if isinstance(l.get("category", ""), str) and l.get("category", "").startswith("lane/")]
-
+        stats['total_images'] += 1
         if lane_labels:
-            stats["images_with_lanes"] += 1
-            stats["total_lane_annotations"] += len(lane_labels)
+            stats['images_with_lanes'] += 1
+            stats['total_lane_annotations'] += len(lane_labels)
 
-        mask = render_lane_mask(lane_labels, mask_width, mask_height, img_width, img_height, line_thickness)
+        if (not overwrite) and os.path.isfile(mask_path):
+            stats['skipped_existing'] += 1
+            continue
+
+        mask = render_lane_mask(
+            lane_labels,
+            mask_width=mask_width,
+            mask_height=mask_height,
+            img_width=img_width,
+            img_height=img_height,
+            line_thickness=line_thickness,
+        )
         cv2.imwrite(mask_path, mask)
+        stats['written_masks'] += 1
+
+        if len(debug_examples) < 3:
+            debug_examples.append({
+                'image_name': image_name,
+                'source': source_path,
+                'n_lane_labels': len(lane_labels),
+                'mask_path': mask_path,
+                'mask_has_pixels': int(mask.sum() > 0),
+            })
+
+    if debug_examples:
+        print('Lane render debug examples:')
+        for ex in debug_examples:
+            print(' ', ex)
     return stats
 
 
 def print_lane_stats(stats: Dict[str, int]) -> None:
     print(f"\n{'='*40}")
-    print(" Lane Mask Statistics")
+    print(' Lane Mask Statistics')
     print(f"{'='*40}")
+    print(f" Total records seen:     {stats.get('total_records_seen', 0):,}")
     print(f" Total images:          {stats['total_images']:,}")
     print(f" Images with lanes:     {stats['images_with_lanes']:,}")
     pct = (stats['images_with_lanes'] / max(1, stats['total_images'])) * 100
@@ -180,4 +230,7 @@ def print_lane_stats(stats: Dict[str, int]) -> None:
     print(f" Total lane annotations:{stats['total_lane_annotations']:,}")
     avg = stats['total_lane_annotations'] / max(1, stats['images_with_lanes'])
     print(f" Avg lanes per image:   {avg:.1f}")
+    print(f" Written masks:         {stats.get('written_masks', 0):,}")
+    print(f" Skipped existing:      {stats.get('skipped_existing', 0):,}")
+    print(f" JSON errors:           {stats.get('json_errors', 0):,}")
     print(f"{'='*40}")
