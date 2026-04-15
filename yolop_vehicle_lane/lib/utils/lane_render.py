@@ -112,15 +112,39 @@ def render_lane_mask(
 
 def convert_bdd_lanes_to_masks(
     json_path: str,
-    output_mask_dir: str,
+    output_mask_dir: Optional[str] = None,
     mask_width: int = 640,
     mask_height: int = 640,
     img_width: int = 1280,
     img_height: int = 720,
     line_thickness: int = 3,
     debug_limit: Optional[int] = None,
+    **legacy_kwargs,
 ) -> Dict[str, int]:
-    """Convert all BDD100K lane labels from a JSON file to binary mask PNGs."""
+    """Convert all BDD100K lane labels from a JSON file to binary mask PNGs.
+
+    Backward-compatible aliases are accepted so older notebooks copied from
+    earlier experiments still run:
+      output_dir   -> output_mask_dir
+      img_w / img_h -> img_width / img_height
+      mask_w / mask_h -> mask_width / mask_height
+    """
+    if output_mask_dir is None:
+        output_mask_dir = legacy_kwargs.pop('output_dir', None)
+    if output_mask_dir is None:
+        raise TypeError('convert_bdd_lanes_to_masks() missing required argument: output_mask_dir')
+
+    if 'img_w' in legacy_kwargs:
+        img_width = legacy_kwargs.pop('img_w')
+    if 'img_h' in legacy_kwargs:
+        img_height = legacy_kwargs.pop('img_h')
+    if 'mask_w' in legacy_kwargs:
+        mask_width = legacy_kwargs.pop('mask_w')
+    if 'mask_h' in legacy_kwargs:
+        mask_height = legacy_kwargs.pop('mask_h')
+    if legacy_kwargs:
+        raise TypeError(f'Unexpected keyword arguments: {sorted(legacy_kwargs.keys())}')
+
     os.makedirs(output_mask_dir, exist_ok=True)
     with open(json_path, "r") as f:
         data = json.load(f)
