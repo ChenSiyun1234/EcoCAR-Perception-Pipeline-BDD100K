@@ -48,18 +48,25 @@ def _has_dataset_layout(
     lane_dir_candidates: Optional[Iterable[str]] = ('masks', 'lane_masks'),
     require_lane_dir: bool = True,
 ) -> bool:
+    """A "valid" packaged dataset directory.
+
+    Masks-only archives are now treated as valid:
+      * when require_lane_dir=True: we only need a `masks/train` (or
+        `lane_masks/train`) subdir. Images and labels can come from the
+        raw BDD root via `find_raw_bdd_root` + `resolve_bdd_*_100k_dir`.
+      * when require_lane_dir=False: the root counts as valid as long
+        as at least one of images/labels/masks has a train/ subdir, so
+        a freshly-extracted archive (which might only have masks) or a
+        partially-populated scaffold passes.
+    """
     root = str(root)
-    if not os.path.isdir(os.path.join(root, 'images', 'train')):
-        return False
-    if not os.path.isdir(os.path.join(root, 'labels', 'train')):
-        return False
-    lane_dir_candidates = _normalize_lane_candidates(lane_dir_candidates)
-    if not require_lane_dir:
-        return True
-    for lane_name in lane_dir_candidates:
-        if os.path.isdir(os.path.join(root, lane_name, 'train')):
-            return True
-    return False
+    lane_names = _normalize_lane_candidates(lane_dir_candidates) or []
+    has_lane = any(os.path.isdir(os.path.join(root, name, 'train')) for name in lane_names)
+    has_images = os.path.isdir(os.path.join(root, 'images', 'train'))
+    has_labels = os.path.isdir(os.path.join(root, 'labels', 'train'))
+    if require_lane_dir:
+        return has_lane
+    return has_lane or has_images or has_labels
 
 
 def _find_dataset_roots(
@@ -108,11 +115,17 @@ def _candidate_drive_dirs(dataset_name: str, ecocar_root: str) -> List[str]:
 
 
 def _candidate_tar_paths(dataset_name: str, ecocar_root: str) -> List[str]:
+    """Candidate archive paths, preferring the compressed canonical form.
+
+    The project standard is `<EcoCAR>/datasets/<name>.tar.gz`. We also
+    accept the same path without compression, plus a flat layout directly
+    under `<EcoCAR>/` for legacy projects.
+    """
     return [
-        os.path.join(ecocar_root, 'datasets', f'{dataset_name}.tar'),
         os.path.join(ecocar_root, 'datasets', f'{dataset_name}.tar.gz'),
-        os.path.join(ecocar_root, f'{dataset_name}.tar'),
+        os.path.join(ecocar_root, 'datasets', f'{dataset_name}.tar'),
         os.path.join(ecocar_root, f'{dataset_name}.tar.gz'),
+        os.path.join(ecocar_root, f'{dataset_name}.tar'),
     ]
 
 
@@ -147,20 +160,28 @@ def ensure_local_dataset_from_drive(
     if existing:
         return existing[0]
 
+    # Try every tar candidate. Don't break on the first failed extraction —
+    # older snapshots of this project leave a legacy uncompressed .tar next
+    # to the canonical .tar.gz; we want to fall through to the valid one.
     tar_candidates = _candidate_tar_paths(dataset_name, ecocar_root)
     for tar_path in tar_candidates:
-        if os.path.isfile(tar_path):
-            print(f'Extracting {tar_path} into this notebook runtime ...')
+        if not os.path.isfile(tar_path):
+            continue
+        print(f'Extracting {tar_path} into this notebook runtime ...')
+        try:
             with tarfile.open(tar_path, 'r:*') as tar:
                 tar.extractall('/content', filter='data')
-            found = _find_dataset_roots(
-                search_roots,
-                lane_dir_candidates=lane_dir_candidates,
-                require_lane_dir=require_lane_dir,
-            )
-            if found:
-                return found[0]
-            break
+        except (tarfile.ReadError, tarfile.TarError, EOFError, OSError) as exc:
+            print(f'  [warn] extraction failed ({exc}); trying next candidate')
+            continue
+        found = _find_dataset_roots(
+            search_roots,
+            lane_dir_candidates=lane_dir_candidates,
+            require_lane_dir=require_lane_dir,
+        )
+        if found:
+            return found[0]
+        print(f'  [warn] {tar_path} extracted but no valid layout found; trying next')
 
     for drive_dir in _candidate_drive_dirs(dataset_name, ecocar_root):
         if _has_dataset_layout(drive_dir, lane_dir_candidates=lane_dir_candidates, require_lane_dir=require_lane_dir):

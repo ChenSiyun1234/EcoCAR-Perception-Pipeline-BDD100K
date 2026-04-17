@@ -136,14 +136,25 @@ class MultiHeadLoss(nn.Module):
 
 
 def get_loss(cfg, device):
-    """Build MultiHeadLoss from config."""
+    """Build MultiHeadLoss from config.
+
+    YOLOP applies focal loss only to BCEcls / BCEobj when FL_GAMMA > 0.
+    YOLOPv2 paper §3 applies focal loss to the lane segmentation head
+    as well. We keep YOLOP's behavior by default and add a separate
+    `LOSS.LL_FL_GAMMA` knob: when > 0, BCEseg is focal-wrapped. Set it
+    in the YOLOPv2 YAML; leave it 0 for the YOLOP baseline.
+    """
     BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([cfg.LOSS.CLS_POS_WEIGHT])).to(device)
     BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([cfg.LOSS.OBJ_POS_WEIGHT])).to(device)
     BCEseg = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([cfg.LOSS.SEG_POS_WEIGHT])).to(device)
 
-    gamma = cfg.LOSS.FL_GAMMA
+    gamma = float(getattr(cfg.LOSS, 'FL_GAMMA', 0.0) or 0.0)
     if gamma > 0:
         BCEcls, BCEobj = FocalLoss(BCEcls, gamma), FocalLoss(BCEobj, gamma)
+
+    ll_gamma = float(getattr(cfg.LOSS, 'LL_FL_GAMMA', 0.0) or 0.0)
+    if ll_gamma > 0:
+        BCEseg = FocalLoss(BCEseg, ll_gamma)
 
     loss_list = [BCEcls, BCEobj, BCEseg]
     loss = MultiHeadLoss(loss_list, cfg=cfg, lambdas=cfg.LOSS.MULTI_HEAD_LAMBDA)

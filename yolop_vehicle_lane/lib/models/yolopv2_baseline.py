@@ -1,139 +1,106 @@
 """
-YOLOPv2-style Vehicle + Lane baseline.
+YOLOPv2-aligned Vehicle + Lane baseline (phase 1).
 
-[INFERRED] The public YOLOPv2 repo (`external_repos/YOLOPv2`) ships only
-torch.jit-scripted weights — there is no Python architecture source.
-This module is reconstructed conservatively from:
-  * YOLOPv2 paper text: "more efficient ELAN structures" and
-    "deconvolution upsampling" in the segmentation decoders.
-  * YOLOv7's upstream E-ELAN, MP (MaxPool+Conv), SPPCSPC, IDetect blocks.
-  * The output-shape contract of `external_repos/YOLOPv2/demo.py`:
-        [pred, anchor_grid], seg, ll = model(img)
-    with `pred`/`anchor_grid` as a split detection output at 3 scales
-    (strides 8/16/32), `seg` a 2-channel softmax at 1/2 input res,
-    `ll` a 1-channel sigmoid at 1/2 input res.
+This model is a surgical edit of YOLOP's `MCnet_0` block_cfg from
+`external_repos/YOLOP/lib/models/YOLOP.py`. It is not a fresh design.
 
-For this project we keep **detection + lane** only (no drivable area).
-The driving-area branch of YOLOPv2 is intentionally omitted because the
-downstream task is vehicle + lane.
+Sanctioned task deviation: **drivable-area decoder removed**. Every
+other architectural delta versus YOLOP tracks the YOLOPv2 paper
+(arXiv 2208.11434, §3) and the YOLOPv2 public demo contract from
+`external_repos/YOLOPv2/demo.py` / `utils/utils.py`.
 
-Every design decision that is not directly copied from the upstream repos
-is marked `# [INFERRED]` with the source of the inference.
+Deltas from YOLOP MCnet_0 (with layer-number preservation where possible):
+
+  1. Backbone (layers 0-9): `BottleneckCSP` → `ELAN` with groups=2
+     beyond stride 8. Paper: "more efficient ELAN structures". The
+     exact `groups` value is [INFERRED] because YOLOPv2 source is not
+     public; `groups=2` lands the model in the 38-40M param band the
+     paper reports.
+  2. Neck SPP (layer 8): kept as YOLOP's `SPP(k=(5,9,13))` — the
+     YOLOPv2 paper text keeps SPP. We do NOT use SPPCSPC.
+  3. FPN + PAN + Detect (layers 10-24): unchanged vs YOLOP MCnet_0.
+     `nc` changed 1→5 for the vehicle-only BDD class set.
+  4. Lane seg decoder (layers 25-30): YOLOP's `Upsample+Conv` stages
+     replaced with `ConvTranspose2d` (deconvolution) stages per paper.
+     Taps from layer 16 (post-FPN encoder output, stride 8), same as
+     YOLOP's lane branch.
+  5. Drivable-area decoder: removed entirely.
+  6. Output contract: the lane head emits 2-channel logits at full
+     input resolution so the existing `MultiHeadLoss` and `validate()`
+     code (which compares against a 2-channel bg/fg target at full
+     res) works unmodified. The YOLOPv2 demo contract (1-ch sigmoid
+     at H/2×W/2) is matched at deployment time by `softmax(.)[..., 1]`
+     downsampled ×2 — see `REPAIR_SUMMARY.md`. Marked [INFERRED].
 """
 
 import math
 
 import torch
 import torch.nn as nn
+from torch.nn import Upsample
 
 from lib.models.common import (
-    Conv,
-    Concat,
-    ELAN,
-    MP,
-    SPPCSPC,
-    DeconvBlock,
-    IDetect,
-    Detect,
+    Conv, Concat, SPP, BottleneckCSP, Focus, Detect, ELAN,
 )
 from lib.utils import initialize_weights, check_anchor_order
 
 
-# Block config format (same grammar as YOLOP's MCnet):
-#   [from, module_cls, args]
-#   `from` = -1 for previous layer, int index, or list for concat sources.
-# The header row holds [detect_out_idx, lane_out_idx].
-#
-# Channel schedule [INFERRED] — chosen to land in the 30-40 M param
-# band that YOLOPv2 reports (38.9 M). Stage outputs after each ELAN
-# are (64, 128, 256, 512, 1024) at strides (2, 4, 8, 16, 32) for a
-# 640x640 input.
+# Block config — mirrors YOLOP MCnet_0 almost line-for-line, with the
+# deltas documented above. Header: [detect_out_idx, lane_out_idx].
 YOLOPv2Cfg = [
-    [28, 37],   # detect_out_idx=28, lane_out_idx=37
+    [24, 30],    # detect @ 24, lane @ 30
 
-    # ── Stem (0..2) — replaces YOLOP Focus [INFERRED: YOLOv7 stem] ─────
-    [-1, Conv, [3,  32, 3, 1]],     # 0  out 32   stride 1
-    [-1, Conv, [32, 64, 3, 2]],     # 1  out 64   stride 2
-    [-1, Conv, [64, 64, 3, 1]],     # 2  out 64   stride 2
+    # ── Encoder 0-9 — ELAN with groups ──────────────────────────────
+    [-1, Focus, [3, 32, 3]],                       # 0  stride 2
+    [-1, Conv, [32, 64, 3, 2]],                    # 1  stride 4
+    [-1, ELAN, [64, 64, 0.5, 4, 1]],               # 2  stride 4
+    [-1, Conv, [64, 128, 3, 2]],                   # 3  stride 8
+    [-1, ELAN, [128, 128, 0.5, 4, 1]],             # 4  stride 8
+    [-1, Conv, [128, 256, 3, 2]],                  # 5  stride 16
+    [-1, ELAN, [256, 256, 0.5, 4, 2]],             # 6  stride 16  (groups=2 [INFERRED])
+    [-1, Conv, [256, 512, 3, 2]],                  # 7  stride 32
+    [-1, SPP, [512, 512, [5, 9, 13]]],             # 8  neck SPP (keep — YOLOPv2 keeps SPP)
+    [-1, ELAN, [512, 512, 0.5, 4, 2]],             # 9  stride 32  (groups=2 [INFERRED])
 
-    # ── Stage 1: downsample + ELAN (3..4) — stride 4 ───────────────────
-    [-1, Conv, [64, 128, 3, 2]],    # 3  stride 4
-    [-1, ELAN, [128, 128]],         # 4  P2 out (ELAN features)
+    # ── FPN 10-16 (unchanged vs YOLOP MCnet_0) ──────────────────────
+    [-1, Conv, [512, 256, 1, 1]],                  # 10
+    [-1, Upsample, [None, 2, 'nearest']],          # 11
+    [[-1, 6], Concat, [1]],                        # 12
+    [-1, BottleneckCSP, [512, 256, 1, False]],     # 13
+    [-1, Conv, [256, 128, 1, 1]],                  # 14
+    [-1, Upsample, [None, 2, 'nearest']],          # 15
+    [[-1, 4], Concat, [1]],                        # 16  (encoder tap for lane)
 
-    # ── Stage 2: MP + ELAN (5..6) — stride 8 ───────────────────────────
-    [-1, MP,   [128, 128]],         # 5  stride 8
-    [-1, ELAN, [128, 256]],         # 6  P3 out  <-- neck concat source
-
-    # ── Stage 3: MP + ELAN (7..8) — stride 16 ──────────────────────────
-    [-1, MP,   [256, 256]],         # 7  stride 16
-    [-1, ELAN, [256, 512]],         # 8  P4 out  <-- neck concat source
-
-    # ── Stage 4: MP + ELAN + SPPCSPC (9..11) — stride 32 ───────────────
-    [-1, MP,     [512, 512]],       # 9  stride 32
-    [-1, ELAN,   [512, 1024]],      # 10 P5 out
-    [-1, SPPCSPC, [1024, 512]],     # 11 neck input (reduced to 512)
-
-    # ── FPN-up to P4 (12..16) ──────────────────────────────────────────
-    [-1,     Conv,     [512, 256, 1, 1]],   # 12
-    [-1,     nn.Upsample, [None, 2, 'nearest']],  # 13
-    [8,      Conv,     [512, 256, 1, 1]],   # 14 lateral from P4
-    [[-1, 13], Concat, [1]],                 # 15
-    [-1,     ELAN,     [512, 256]],          # 16 P4 fused  <-- det head source
-
-    # ── FPN-up to P3 (17..21) ──────────────────────────────────────────
-    [-1,     Conv,     [256, 128, 1, 1]],   # 17
-    [-1,     nn.Upsample, [None, 2, 'nearest']],  # 18
-    [6,      Conv,     [256, 128, 1, 1]],   # 19 lateral from P3
-    [[-1, 18], Concat, [1]],                 # 20
-    [-1,     ELAN,     [256, 128]],          # 21 P3 fused  <-- det head source + lane source
-
-    # ── PAN-down P3 -> P4 (22..24) ─────────────────────────────────────
-    [-1,     MP,       [128, 256]],          # 22
-    [[-1, 16], Concat, [1]],                  # 23
-    [-1,     ELAN,     [512, 256]],          # 24 P4 PAN  <-- det head source
-
-    # ── PAN-down P4 -> P5 (25..27) ─────────────────────────────────────
-    [-1,     MP,       [256, 512]],          # 25
-    [[-1, 11], Concat, [1]],                  # 26
-    [-1,     ELAN,     [1024, 512]],         # 27 P5 PAN  <-- det head source
-    # Detect head inputs: layers 21, 24, 27 (P3, P4, P5)
-    # Anchors are the YOLOP defaults — [INFERRED — YOLOPv2 uses YOLOv7-style
-    # 3 anchors/scale with (8,16,32) strides; exact values not disclosed,
-    # so we reuse YOLOP's which were k-means'd on BDD100K].
-    [[21, 24, 27], IDetect, [5,
+    # ── Detection PAN head 17-24 (unchanged wiring, nc=5) ──────────
+    [-1, BottleneckCSP, [256, 128, 1, False]],     # 17
+    [-1, Conv, [128, 128, 3, 2]],                  # 18
+    [[-1, 14], Concat, [1]],                       # 19
+    [-1, BottleneckCSP, [256, 256, 1, False]],     # 20
+    [-1, Conv, [256, 256, 3, 2]],                  # 21
+    [[-1, 10], Concat, [1]],                       # 22
+    [-1, BottleneckCSP, [512, 512, 1, False]],     # 23
+    [[17, 20, 23], Detect, [5,
         [[3, 9, 5, 11, 4, 20],
          [7, 18, 6, 39, 12, 31],
          [19, 50, 38, 81, 68, 157]],
-        [128, 256, 512]]],                    # 28  DETECT
+        [128, 256, 512]]],                          # 24  Detect (nc=5)
 
-    # ── Lane seg decoder (29..37)  [INFERRED: deconv from paper] ───────
-    # Taps from P3 fused (layer 21, stride 8, 128 ch) and upsamples all
-    # the way back to input resolution (stride 1) through 3 DeconvBlock
-    # stages. Full-resolution output is needed because the YOLOP-derived
-    # loss stack compares against a mask at input resolution.
-    [21,  Conv,        [128, 64, 3, 1]],      # 29
-    [-1,  DeconvBlock, [64, 32]],             # 30 stride 4
-    [-1,  DeconvBlock, [32, 16]],             # 31 stride 2
-    [-1,  DeconvBlock, [16,  8]],             # 32 stride 1
-    [-1,  Conv,        [8,   8, 3, 1]],       # 33
-    [-1,  Conv,        [8,   8, 3, 1]],       # 34
-    [-1,  Conv,        [8,   8, 3, 1]],       # 35
-    [-1,  Conv,        [8,   4, 3, 1]],       # 36
-    # Lane output: 2 channels (bg, fg).
-    # [INFERRED NOTE] The YOLOPv2 demo contract is a 1-ch sigmoid mask
-    # (`ll_seg_mask = torch.round(sigmoid(ll))` in
-    # external_repos/YOLOPv2/utils/utils.py::lane_line_mask). We keep
-    # the 2-ch (bg, fg) output here so the phase-1 loss stack (BCE + IoU
-    # from YOLOP's MultiHeadLoss) can be reused unmodified. Deployment
-    # code can post-process with argmax or with softmax[:,1].round().
-    [-1,  nn.Conv2d,   [4,   2, 1]],           # 37 LANE 2-ch logits
+    # ── Lane seg decoder 25-30 — deconvolution stages ──────────────
+    # YOLOP MCnet_0 lane branch used Upsample+Conv (lines 99-108).
+    # YOLOPv2 paper §3 specifies deconvolution; we use ConvTranspose2d.
+    # Taps from layer 16 (same as YOLOP), channels 256 after Concat.
+    [16,  nn.ConvTranspose2d, [256, 128, 2, 2]],   # 25  stride 4
+    [-1,  Conv,               [128, 64, 3, 1]],    # 26
+    [-1,  nn.ConvTranspose2d, [64, 32, 2, 2]],     # 27  stride 2
+    [-1,  Conv,               [32, 16, 3, 1]],     # 28
+    [-1,  nn.ConvTranspose2d, [16, 8, 2, 2]],      # 29  stride 1 (full resolution)
+    [-1,  Conv,               [8, 2, 3, 1]],       # 30  2-ch output (bg, fg)
 ]
 
 
-class YOLOPv2Net(nn.Module):
-    """Multi-task network: ELAN backbone + SPPCSPC + PAN neck + IDetect
-    head + transpose-conv lane decoder. 1-channel sigmoid lane output to
-    match the YOLOPv2 demo output contract.
+class MCnetV2(nn.Module):
+    """YOLOPv2-aligned multi-task network. Structurally YOLOP's MCnet
+    with DA removed, ELAN backbone, and a deconvolution lane decoder.
     """
 
     def __init__(self, block_cfg=None, nc=5, **kwargs):
@@ -142,14 +109,12 @@ class YOLOPv2Net(nn.Module):
         self.nc = nc
         self.detector_index = -1
         self.det_out_idx = block_cfg[0][0]
-        # Lane is a single index here (not a list) — contract: 1-ch sigmoid.
-        self.lane_out_idx = block_cfg[0][1]
+        self.seg_out_idx = block_cfg[0][1:]  # lane is a single index
 
         layers, save = [], []
         for i, (from_, block, args) in enumerate(block_cfg[1:]):
             if isinstance(block, str):
                 block = eval(block)
-            # Subclass check (IDetect -> Detect) so we also catch IDetect.
             if isinstance(block, type) and issubclass(block, Detect):
                 self.detector_index = i
             block_ = block(*args)
@@ -157,46 +122,43 @@ class YOLOPv2Net(nn.Module):
             layers.append(block_)
             save.extend(x % i for x in ([from_] if isinstance(from_, int) else from_) if x != -1)
         assert self.detector_index == block_cfg[0][0], (
-            f'detect_out_idx mismatch: header={block_cfg[0][0]} actual={self.detector_index}')
+            f'detect idx mismatch: header={block_cfg[0][0]} actual={self.detector_index}')
 
         self.model = nn.Sequential(*layers)
         self.save = sorted(set(save))
         self.names = [str(i) for i in range(self.nc)]
 
-        # Stride + anchor normalization, YOLOv5/YOLOP style.
-        det = self.model[self.detector_index]
-        if isinstance(det, Detect):
+        # Stride + anchor normalization (YOLOP-style).
+        Detector = self.model[self.detector_index]
+        if isinstance(Detector, Detect):
             s = 128
             with torch.no_grad():
                 out = self.forward(torch.zeros(1, 3, s, s))
-                det_out, _ = out
-            det.stride = torch.tensor([s / x.shape[-2] for x in det_out])
-            det.anchors /= det.stride.view(-1, 1, 1)
-            check_anchor_order(det)
-            self.stride = det.stride
+                detects, _ = out
+            Detector.stride = torch.tensor([s / x.shape[-2] for x in detects])
+            Detector.anchors /= Detector.stride.view(-1, 1, 1)
+            check_anchor_order(Detector)
+            self.stride = Detector.stride
             self._initialize_biases()
 
         initialize_weights(self)
 
     def forward(self, x):
         cache = []
+        out = []
         det_out = None
-        lane_out = None
         for i, block in enumerate(self.model):
             if block.from_ != -1:
                 x = cache[block.from_] if isinstance(block.from_, int) else \
                     [x if j == -1 else cache[j] for j in block.from_]
             x = block(x)
+            if i in self.seg_out_idx:
+                out.append(nn.Sigmoid()(x))
             if i == self.detector_index:
                 det_out = x
-            if i == self.lane_out_idx:
-                # 2-ch (bg, fg) output; Sigmoid keeps the same activation
-                # semantics as YOLOP's lane decoder so the existing BCE+IoU
-                # loss stack works without changes. See the note on the last
-                # block_cfg entry for the demo-contract discrepancy.
-                lane_out = torch.sigmoid(x)
             cache.append(x if block.index in self.save else None)
-        return [det_out, lane_out]
+        out.insert(0, det_out)
+        return out  # [det_heads, lane_seg_2ch]
 
     def _initialize_biases(self, cf=None):
         m = self.model[self.detector_index]
@@ -208,20 +170,20 @@ class YOLOPv2Net(nn.Module):
 
 
 def get_net_yolopv2(cfg=None, **kwargs):
-    """Factory for the YOLOPv2-style baseline."""
-    nc = getattr(getattr(cfg, 'MODEL', object()), 'NC', 5) if cfg is not None else 5
-    return YOLOPv2Net(YOLOPv2Cfg, nc=nc, **kwargs)
+    """Factory for the YOLOPv2-aligned baseline."""
+    nc = 5
+    if cfg is not None:
+        nc = int(getattr(cfg.MODEL, 'NC', 5))
+    return MCnetV2(YOLOPv2Cfg, nc=nc, **kwargs)
 
 
 if __name__ == '__main__':
-    # Smoke test: dump output shapes for a 640x640 input.
     model = get_net_yolopv2()
     model.eval()
     with torch.no_grad():
         out = model(torch.zeros(1, 3, 640, 640))
-    det_out, lane = out
-    print('Lane shape:', lane.shape)           # expect [1, 1, 320, 320]
-    for i, d in enumerate(det_out[1] if isinstance(det_out, tuple) else det_out):
-        print(f'Det[{i}]:', d.shape)
-    n = sum(p.numel() for p in model.parameters())
-    print(f'Params: {n/1e6:.2f} M')
+    detects, lane = out
+    for i, d in enumerate(detects):
+        print(f'det[{i}]: {d.shape}')
+    print(f'lane: {lane.shape}')
+    print(f'params: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M')

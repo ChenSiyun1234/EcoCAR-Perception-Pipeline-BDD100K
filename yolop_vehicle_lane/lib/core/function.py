@@ -18,7 +18,7 @@ from threading import Thread
 import cv2
 import numpy as np
 import torch
-from torch.cuda import amp
+from torch import amp  # torch.amp replaces torch.cuda.amp in recent PyTorch
 from tqdm import tqdm
 
 from lib.core.evaluate import ConfusionMatrix, SegmentationMetric
@@ -49,7 +49,13 @@ def train(cfg, train_loader, model, criterion, optimizer, scaler, epoch, num_bat
     losses = AverageMeter()
 
     model.train()
-    start = time.time()
+    # Per-iteration time pivot. `end` is the timestamp of the previous
+    # iteration's end; `time.time() - end` at the top of the body is the
+    # data-loading wait, and at the bottom is the full iteration. The
+    # original YOLOP code left `start = time.time()` outside the loop
+    # and never reset it, so both data_time and batch_time accumulated
+    # monotonically and made Speed look like 0.0 samples/s.
+    end = time.time()
     for i, (input, target, paths, shapes) in enumerate(train_loader):
         num_iter = i + num_batch * (epoch - 1)
 
@@ -64,7 +70,7 @@ def train(cfg, train_loader, model, criterion, optimizer, scaler, epoch, num_bat
                     x['momentum'] = np.interp(num_iter, xi,
                         [cfg.TRAIN.WARMUP_MOMENTUM, cfg.TRAIN.MOMENTUM])
 
-        data_time.update(time.time() - start)
+        data_time.update(time.time() - end)
         if not cfg.DEBUG:
             input = input.to(device, non_blocking=True)
             assign_target = []
@@ -72,7 +78,7 @@ def train(cfg, train_loader, model, criterion, optimizer, scaler, epoch, num_bat
                 assign_target.append(tgt.to(device))
             target = assign_target
 
-        with amp.autocast(enabled=device.type != 'cpu'):
+        with amp.autocast(device_type=device.type, enabled=device.type != 'cpu'):
             outputs = model(input)
             total_loss, head_losses = criterion(outputs, target, shapes, model)
 
@@ -83,7 +89,7 @@ def train(cfg, train_loader, model, criterion, optimizer, scaler, epoch, num_bat
 
         if rank in [-1, 0]:
             losses.update(total_loss.item(), input.size(0))
-            batch_time.update(time.time() - start)
+            batch_time.update(time.time() - end)
             if i % cfg.PRINT_FREQ == 0:
                 msg = 'Epoch: [{0}][{1}/{2}]\t' \
                       'Time {batch_time.val:.3f}s ({batch_time.avg:.3f}s)\t' \
@@ -91,7 +97,7 @@ def train(cfg, train_loader, model, criterion, optimizer, scaler, epoch, num_bat
                       'Data {data_time.val:.3f}s ({data_time.avg:.3f}s)\t' \
                       'Loss {loss.val:.5f} ({loss.avg:.5f})'.format(
                           epoch, i, len(train_loader), batch_time=batch_time,
-                          speed=input.size(0)/batch_time.val,
+                          speed=input.size(0)/max(batch_time.val, 1e-6),
                           data_time=data_time, loss=losses)
                 logger.info(msg)
 
@@ -99,6 +105,10 @@ def train(cfg, train_loader, model, criterion, optimizer, scaler, epoch, num_bat
                 global_steps = writer_dict['train_global_steps']
                 writer.add_scalar('train_loss', losses.val, global_steps)
                 writer_dict['train_global_steps'] = global_steps + 1
+
+        # Reset the per-iteration pivot so the next batch's data_time /
+        # batch_time are per-iteration, not cumulative.
+        end = time.time()
 
 
 def validate(epoch, config, val_loader, val_dataset, model, criterion, output_dir,

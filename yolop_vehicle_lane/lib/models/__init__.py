@@ -1,22 +1,19 @@
-"""Model factory with explicit baseline dispatch.
+"""Phase-1 model factory.
 
-Baselines:
-- `yolop_baseline.py`       honest YOLOP-style baseline (DA removed, nc=5).
-- `yolopv2_baseline.py`     YOLOPv2-style reconstruction (ELAN + SPPCSPC +
-                            transpose-conv lane-seg decoder; INFERRED).
-Stage-2 variant (point lane, baseline untouched):
-- `yolopv2_detrlane.py`     YOLOPv2 encoder/neck + IDetect + DETR-style
-                            LaneSetHead emitting (exist, points, vis, type).
+Two faithful baselines:
+- `yolop_baseline.py`   : upstream YOLOP `MCnet_0` with DA head removed, nc=5.
+- `yolopv2_baseline.py` : YOLOP MCnet_0 surgically edited toward the
+                          YOLOPv2 paper spec: E-ELAN backbone (with
+                          groups), SPP kept, deconv lane decoder, 1-ch
+                          sigmoid lane output at H/2×W/2.
 
-`get_net(cfg)` dispatches on `cfg.MODEL.NAME`:
-  - 'YOLOP'          -> yolop_baseline.get_net
-  - 'YOLOPv2'        -> yolopv2_baseline.get_net_yolopv2
-  - 'YOLOPv2-DETRLane' -> yolopv2_detrlane.get_net_yolopv2_detrlane
+Stage-2 experimental variants (DETR lane, etc.) live under
+`stage2/lib/models/` and are imported on demand from that sub-tree,
+not from here.
 """
 
 from .yolop_baseline import get_net as _get_net_yolop
 from .yolopv2_baseline import get_net_yolopv2 as _get_net_yolopv2
-from .yolopv2_detrlane import get_net_yolopv2_detrlane as _get_net_yolopv2_detrlane
 
 
 def get_net(cfg=None, **kwargs):
@@ -29,13 +26,8 @@ def get_net(cfg=None, **kwargs):
         return _get_net_yolop(cfg, **kwargs)
     if name in ('YOLOPV2', 'YOLOPV2-VEHICLE-LANE', 'YOLOPV2-BASELINE', 'VEHICLELANE'):
         return _get_net_yolopv2(cfg, **kwargs)
-    if name in ('YOLOPV2-DETRLANE', 'YOLOPV2DETRLANE', 'YOLOPV2-DETR-LANE'):
-        return _get_net_yolopv2_detrlane(cfg, **kwargs)
-    raise ValueError(
-        f"Unknown MODEL.NAME={name!r}. Use 'YOLOP', 'YOLOPv2', or 'YOLOPv2-DETRLane'."
-    )
+    raise ValueError(f"Unknown MODEL.NAME={name!r}. Use 'YOLOP' or 'YOLOPv2'.")
 
 
 get_net_yolop = _get_net_yolop
 get_net_yolopv2 = _get_net_yolopv2
-get_net_yolopv2_detrlane = _get_net_yolopv2_detrlane

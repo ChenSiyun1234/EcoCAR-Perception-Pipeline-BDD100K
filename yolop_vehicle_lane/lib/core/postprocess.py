@@ -71,7 +71,12 @@ def build_targets(cfg, predictions, targets, model):
 
         # Append
         a = t[:, 6].long()  # anchor indices
-        indices.append((b, a, gj.clamp_(0, gain[3] - 1), gi.clamp_(0, gain[2] - 1)))  # image, anchor, grid indices
+        # PyTorch >= 2.1 refuses to clamp a long tensor with float bounds,
+        # so explicitly cast the grid-size bounds (gain[3], gain[2] are
+        # float features of a torch.ones tensor).
+        gj = gj.clamp_(0, int(gain[3].item()) - 1)
+        gi = gi.clamp_(0, int(gain[2].item()) - 1)
+        indices.append((b, a, gj, gi))  # image, anchor, grid indices
         tbox.append(torch.cat((gxy - gij, gwh), 1))  # box
         anch.append(anchors[a])  # anchors
         tcls.append(c)  # class

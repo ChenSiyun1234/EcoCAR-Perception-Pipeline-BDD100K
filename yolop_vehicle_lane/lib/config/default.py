@@ -52,6 +52,7 @@ _C.LOSS.CLS_GAIN = 0.5
 _C.LOSS.OBJ_GAIN = 1.0
 _C.LOSS.LL_SEG_GAIN = 1.0   # lane line segmentation loss gain (YOLOP/YOLOPv2 mask path)
 _C.LOSS.LL_IOU_GAIN = 0.2   # lane line IoU loss gain
+_C.LOSS.LL_FL_GAMMA = 0.0   # lane seg focal-loss γ; YOLOPv2 paper turns this on
 # Task weights for the YOLOPv2-DETRLane Stage-2 variant only.
 _C.LOSS.DET_TASK_WEIGHT = 1.0
 _C.LOSS.LANE_TASK_WEIGHT = 1.0
@@ -167,6 +168,14 @@ _C.TEST.SAVE_TXT = False
 _C.TEST.PLOTS = True
 _C.TEST.NMS_CONF_THRESHOLD = 0.001
 _C.TEST.NMS_IOU_THRESHOLD = 0.6
+# YOLOPv2 paper: train 640x640, test 640x384. Kept [640,640] by default
+# for back-compat with YOLOP; the YOLOPv2 YAML overrides this to
+# [640, 384].
+_C.TEST.IMAGE_SIZE = [640, 640]   # width x height
+
+# Lane mask render widths. YOLOPv2 paper: width 8 train, width 2 test.
+_C.DATASET.LANE_TRAIN_THICKNESS = 8
+_C.DATASET.LANE_TEST_THICKNESS = 2
 
 
 def update_config(cfg, args):

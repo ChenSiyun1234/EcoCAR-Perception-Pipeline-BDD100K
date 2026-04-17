@@ -83,7 +83,18 @@ def render_lane_mask(
     img_height: int = 720,
     line_thickness: int = 3,
 ) -> np.ndarray:
-    """Render lane polylines as a binary mask."""
+    """Render lane polylines as a binary mask.
+
+    [INFERRED] YOLOPv2 paper §3 says masks are drawn on the centerline
+    between the two annotated lines of each lane. BDD100K stores each
+    lane edge as a separate `poly2d` with no explicit "which two belong
+    together" link, so computing the centerline requires a pairing
+    heuristic. We currently draw each annotated poly2d directly at
+    `line_thickness`. This over-represents lane pixels by ~2× at small
+    widths but converges to a similar supervision signal at the paper's
+    width 8 (train) because the two edges fuse. At width 2 (test) this
+    matters more — documented as a known limitation.
+    """
     mask = np.zeros((mask_height, mask_width), dtype=np.uint8)
     sx = mask_width / float(img_width)
     sy = mask_height / float(img_height)

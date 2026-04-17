@@ -288,18 +288,25 @@ class Detect(nn.Module):
 
 class ELAN(nn.Module):
     """Efficient Layer Aggregation Network block.
-    [INFERRED from YOLOv7 yolov7.yaml] — two 1x1 branches; the second
-    branch runs through four stacked 3x3 convs and we concat the outputs
-    of every 3x3 (4 intermediates) with the two 1x1 branches, then 1x1
-    fuse. Number of intermediates (4) chosen to match YOLOv7-small.
+    [INFERRED from YOLOv7 yolov7.yaml + YOLOPv2 paper §3] — two 1x1
+    branches; the second branch runs through `n_3x3` stacked 3x3 convs
+    and we concat the outputs of every 3x3 with the two 1x1 branches,
+    then 1x1 fuse.
+
+    YOLOPv2 paper claims "more efficient ELAN with group convolution".
+    We expose `groups`; when set >1 it turns the 3x3 stack into group
+    convolutions, which is the E-ELAN concept in YOLOv7. `groups=1`
+    reduces to plain ELAN.
     """
 
-    def __init__(self, c1, c2, e=0.5, n_3x3=4):
+    def __init__(self, c1, c2, e=0.5, n_3x3=4, groups=1):
         super().__init__()
         c_ = int(c2 * e)  # hidden
+        assert c_ % groups == 0, (
+            f'ELAN hidden={c_} not divisible by groups={groups}')
         self.cv1 = Conv(c1, c_, 1, 1)
         self.cv2 = Conv(c1, c_, 1, 1)
-        self.m = nn.ModuleList(Conv(c_, c_, 3, 1) for _ in range(n_3x3))
+        self.m = nn.ModuleList(Conv(c_, c_, 3, 1, g=groups) for _ in range(n_3x3))
         self.fuse = Conv(c_ * (2 + n_3x3), c2, 1, 1)
 
     def forward(self, x):
