@@ -1,0 +1,134 @@
+# Stage-2 YOLOPv2 + DETR-style Lane (point-based) configuration.
+# Keeps the YOLOPv2 ELAN backbone + SPPCSPC + PAN neck and anchor IDetect
+# head IDENTICAL to the baseline, and replaces ONLY the lane branch with
+# a DETR-style set-prediction head operating on polyline point labels.
+#
+# Baseline reproducibility is unaffected: this yaml sets MODEL.NAME to
+# 'YOLOPv2-DETRLane' which dispatches to lib/models/yolopv2_detrlane.py.
+# `yolopv2_vehicle_lane_baseline.yaml` remains the mask-based baseline.
+
+GPUS: (0,)
+WORKERS: 4
+PIN_MEMORY: true
+PRINT_FREQ: 20
+AUTO_RESUME: true
+NEED_AUTOANCHOR: false
+DEBUG: false
+
+CUDNN:
+  BENCHMARK: true
+  DETERMINISTIC: false
+  ENABLED: true
+
+DRIVE:
+  ROOT: '/content/drive/MyDrive/EcoCAR'
+  CHECKPOINT_DIR: '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/checkpoints/yolopv2_detrlane'
+  METRICS_DIR:    '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/metrics/yolopv2_detrlane'
+
+MODEL:
+  NAME: 'YOLOPv2-DETRLane'
+  NC: 5
+  VEHICLE_CLASSES: ['car', 'truck', 'bus', 'motorcycle', 'bicycle']
+  PRETRAINED: ''
+  IMAGE_SIZE: [640, 640]
+
+LOSS:
+  MULTI_HEAD_LAMBDA: [1.0, 1.0, 1.0]    # [cls, obj, iou] — lane terms handled in LANE.*
+  FL_GAMMA: 0.0
+  CLS_POS_WEIGHT: 1.0
+  OBJ_POS_WEIGHT: 1.0
+  SEG_POS_WEIGHT: 1.0
+  BOX_GAIN: 0.05
+  CLS_GAIN: 0.5
+  OBJ_GAIN: 1.0
+  LL_SEG_GAIN: 0.0          # unused in this variant
+  LL_IOU_GAIN: 0.0          # unused in this variant
+  # Multi-task balance between heads.
+  DET_TASK_WEIGHT: 1.0
+  LANE_TASK_WEIGHT: 1.0
+
+# LANE head (DETR-style) configuration. See lib/models/yolopv2_detrlane.py.
+LANE:
+  NUM_QUERIES: 10
+  NUM_POINTS: 72
+  NUM_TYPES: 7
+  MAX_GT: 10
+  D_MODEL: 256
+  NHEAD: 8
+  FFN_DIM: 1024
+  DEC_LAYERS: 3
+  DROPOUT: 0.0
+  USE_TASK_ADAPTERS: true
+  ADAPTER_HIDDEN_RATIO: 0.5
+  EXIST_WEIGHT: 2.0
+  PTS_WEIGHT: 5.0
+  TYPE_WEIGHT: 1.0
+  TANGENT_WEIGHT: 1.0
+  CURVATURE_WEIGHT: 0.5
+  OVERLAP_WEIGHT: 2.0
+  VIS_WEIGHT: 0.5
+  AUX_WEIGHT: 0.5
+  RASTER_H: 72
+  RASTER_W: 128
+  RASTER_THICKNESS: 0.03
+  GEOM_WARMUP_SCALE: 0.70
+  GEOM_FINAL_SCALE: 1.00
+  RASTER_START_SCALE: 1.00
+  RASTER_FINAL_SCALE: 0.15
+  DET_ONLY_EPOCHS: 3         # detection-only warmup before lane loss turns on
+
+DATASET:
+  DATASET: 'BddDatasetPoints'
+  TRAIN_SET: 'train'
+  TEST_SET: 'val'
+  DATA_FORMAT: 'jpg'
+  ORG_IMG_SIZE: [720, 1280]
+  FLIP: true
+  SCALE_FACTOR: 0.25
+  ROT_FACTOR: 0              # geometry-sensitive lane path: no perspective warp
+  TRANSLATE: 0.0
+  SHEAR: 0.0
+  COLOR_RGB: false
+  HSV_H: 0.015
+  HSV_S: 0.7
+  HSV_V: 0.4
+  MOSAIC: false              # not used for the point path (mosaic corrupts polylines)
+  MIXUP: false
+  # Required: pre-rendered per-image lane-JSON directory (or a single
+  # consolidated lane_{train,val}.json). The points dataset does not
+  # use the rendered binary masks.
+  LANE_JSON_TRAIN: ''
+  LANE_JSON_VAL: ''
+
+TRAIN:
+  LR0: 0.001
+  LRF: 0.2
+  WARMUP_EPOCHS: 3.0
+  WARMUP_BIASE_LR: 0.1
+  WARMUP_MOMENTUM: 0.8
+  OPTIMIZER: 'adam'
+  MOMENTUM: 0.937
+  WD: 0.0005
+  NESTEROV: true
+  GAMMA1: 0.99
+  GAMMA2: 0.0
+  BEGIN_EPOCH: 0
+  END_EPOCH: 100
+  VAL_FREQ: 1
+  BATCH_SIZE_PER_GPU: 12     # DETR head raises VRAM a bit
+  SHUFFLE: true
+  IOU_THRESHOLD: 0.2
+  ANCHOR_THRESHOLD: 4.0
+  DET_ONLY: false
+  LANE_ONLY: false
+  ENC_DET_ONLY: false
+  PLOT: true
+
+TEST:
+  BATCH_SIZE_PER_GPU: 16
+  MODEL_FILE: ''
+  SAVE_JSON: false
+  SAVE_TXT: false
+  PLOTS: true
+  NMS_CONF_THRESHOLD: 0.001
+  NMS_IOU_THRESHOLD: 0.6

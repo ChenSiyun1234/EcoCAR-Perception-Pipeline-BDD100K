@@ -50,8 +50,44 @@ _C.LOSS.SEG_POS_WEIGHT = 1.0
 _C.LOSS.BOX_GAIN = 0.05
 _C.LOSS.CLS_GAIN = 0.5
 _C.LOSS.OBJ_GAIN = 1.0
-_C.LOSS.LL_SEG_GAIN = 1.0   # lane line segmentation loss gain
+_C.LOSS.LL_SEG_GAIN = 1.0   # lane line segmentation loss gain (YOLOP/YOLOPv2 mask path)
 _C.LOSS.LL_IOU_GAIN = 0.2   # lane line IoU loss gain
+# Task weights for the YOLOPv2-DETRLane Stage-2 variant only.
+_C.LOSS.DET_TASK_WEIGHT = 1.0
+_C.LOSS.LANE_TASK_WEIGHT = 1.0
+
+# LANE head config — consumed by the YOLOPv2-DETRLane variant.
+# Not used by the YOLOP / YOLOPv2 mask baselines.
+_C.LANE = CN(new_allowed=True)
+_C.LANE.NUM_QUERIES = 10
+_C.LANE.NUM_POINTS = 72
+_C.LANE.NUM_TYPES = 7
+_C.LANE.MAX_GT = 10
+_C.LANE.D_MODEL = 256
+_C.LANE.NHEAD = 8
+_C.LANE.FFN_DIM = 1024
+_C.LANE.DEC_LAYERS = 3
+_C.LANE.DROPOUT = 0.0
+_C.LANE.USE_TASK_ADAPTERS = True
+_C.LANE.ADAPTER_HIDDEN_RATIO = 0.5
+# Per-term lane loss weights
+_C.LANE.EXIST_WEIGHT = 2.0
+_C.LANE.PTS_WEIGHT = 5.0
+_C.LANE.TYPE_WEIGHT = 1.0
+_C.LANE.TANGENT_WEIGHT = 1.0
+_C.LANE.CURVATURE_WEIGHT = 0.5
+_C.LANE.OVERLAP_WEIGHT = 2.0
+_C.LANE.VIS_WEIGHT = 0.5
+_C.LANE.AUX_WEIGHT = 0.5
+_C.LANE.RASTER_H = 72
+_C.LANE.RASTER_W = 128
+_C.LANE.RASTER_THICKNESS = 0.03
+_C.LANE.GEOM_WARMUP_SCALE = 0.70
+_C.LANE.GEOM_FINAL_SCALE = 1.00
+_C.LANE.RASTER_START_SCALE = 1.00
+_C.LANE.RASTER_FINAL_SCALE = 0.15
+# Staged training: number of epochs to run detection-only before enabling lane loss
+_C.LANE.DET_ONLY_EPOCHS = 3
 
 # DATASET related params (no MASKROOT for drivable area)
 _C.DATASET = CN(new_allowed=True)

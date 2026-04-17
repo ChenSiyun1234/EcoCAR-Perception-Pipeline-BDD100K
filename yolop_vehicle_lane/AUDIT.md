@@ -182,6 +182,36 @@ the moment an official YOLOPv2 training release appears.
 - `notebooks/07_h100_video_profile.ipynb` — A5000 peak TFLOPS, file
   renamed on disk to `07_a5000_video_profile.ipynb`.
 
+## 5b. Stage-2 additions (baseline untouched)
+
+After the Phase-1 repair, a point-based lane branch was added as a
+*separate* Stage-2 baseline — specifically the user's request to move
+the lane side from mask matching to data matching (predict a set of
+polyline points) while keeping the anchor-based vehicle head.
+
+New files, all orthogonal to the Phase-1 baseline:
+- `lib/models/yolopv2_detrlane.py` — YOLOPv2 encoder/neck + IDetect +
+  DETR-style `LaneSetHead` with task-specific adapters and a
+  detection-only warmup gate.
+- `lib/models/lane_set_head.py` — vendored lane head from
+  `DETR_GeoLane_pipeline/src/lane_head.py` (attribution in the file).
+- `lib/core/lane_set_loss.py` — vendored Hungarian-matched curve
+  loss from `DETR_GeoLane_pipeline/src/losses.py`.
+- `lib/core/loss_detrlane.py` — multi-task wrapper combining YOLOP
+  anchor detection loss with `LaneSetLoss`.
+- `lib/dataset/bdd_points.py` — `BddDatasetPoints` emitting
+  (existence, points, visibility, lane_type) from BDD lane JSONs.
+- `configs/yolopv2_detrlane_vehicle_lane.yaml` — Stage-2 config.
+  `MODEL.NAME = YOLOPv2-DETRLane` dispatches the new model.
+- `notebooks/05_lane_head_and_loss_upgrade.ipynb` — training loop
+  for this variant, writes to `checkpoints/yolopv2_detrlane/`.
+
+Gradient-conflict mitigation strategies applied (all with literature
+support — see `docs/STAGE2_PLAN.md` §8):
+  * per-task residual adapters on each PAN scale
+  * staged training gate (detection-only warmup, then joint)
+  * cosine curriculum between geometric and raster lane losses
+
 ## 6. What is still not reproducible
 
 - Exact YOLOPv2 channel widths per stage.
