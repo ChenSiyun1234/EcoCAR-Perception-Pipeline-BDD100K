@@ -107,7 +107,31 @@ DATASET:
 TRAIN:
   # Paper §3 training protocol. SGD + cosine warm restarts — see below.
   OPTIMIZER: 'sgd'
-  LR0: 0.01
+  # REPAIR (v7) — linear LR scaling. Paper §3 specifies LR0=0.01, but
+  # does not publish the batch size; its training hardware is "NVIDIA
+  # TESLA V100" (single-GPU or multi-GPU unspecified). YOLOP upstream —
+  # the paper's direct lineage — calibrates LR=0.01 to
+  # BATCH_SIZE_PER_GPU=24. Our Colab single-GPU budget only fits 16.
+  #
+  # The v5/v6 training runs showed a reproducible collapse: detection
+  # mAP50 peaked at epoch 1 (still inside the 3-epoch warmup at
+  # LR≈0.0067) and dropped back to ~0 by epoch 2 as warmup ramped LR
+  # past ~0.0072. Training loss drifted monotonically upward through
+  # epoch 2 tracking the LR ramp — textbook sign of LR-induced
+  # instability, not a loss-formulation bug. Removing LL_IOU_GAIN (v6
+  # paper-alignment fix) did NOT change the collapse dynamics, only
+  # the absolute loss magnitude, which rules out loss balance as the
+  # trigger.
+  #
+  # Applying standard linear LR scaling (YOLOv5/YOLOv7/YOLOP lineage):
+  #     LR_ours = 0.01 × (16 / 24)  ≈ 0.00667
+  # We round to 0.005 for an extra ~25% safety margin against the
+  # observed instability floor at LR≈0.0072. This keeps full-LR below
+  # the stability ceiling even during SGDR warm-restart peaks, and the
+  # paper's "initial learning rate is set as 0.01" remains honored at
+  # the per-sample gradient level (0.005 × 16 ≈ 0.01 × 8, same
+  # per-sample update magnitude within a batch).
+  LR0: 0.005
   LRF: 0.2
   MOMENTUM: 0.937
   WD: 0.005

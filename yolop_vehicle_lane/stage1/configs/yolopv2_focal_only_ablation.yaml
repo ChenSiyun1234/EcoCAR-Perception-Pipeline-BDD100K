@@ -82,7 +82,10 @@ DATASET:
 
 TRAIN:
   OPTIMIZER: 'sgd'
-  LR0: 0.01
+  # REPAIR (v7) — linear LR scaling. See yolopv2_best_row.yaml for the
+  # full rationale; both YOLOPv2 ablation rows must use the same LR0
+  # so the A/B comparison is clean.
+  LR0: 0.005
   LRF: 0.2
   MOMENTUM: 0.937
   WD: 0.005

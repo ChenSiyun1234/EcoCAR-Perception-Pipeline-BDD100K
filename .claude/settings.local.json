@@ -13,7 +13,11 @@
       "Bash(log\")",
       "Bash(python -c ' *)",
       "Bash(pip install *)",
-      "Bash(python -m pip install pypdf --quiet)"
+      "Bash(python -m pip install pypdf --quiet)",
+      "Bash(awk '/^Epoch: \\\\[2\\\\]/ {print}' \"/c/Users/HUAWEI/Documents/GitHub/EcoCAR-Perception-Pipeline-YOLO26-BDD100K/yolop_vehicle_lane/training output.txt\")",
+      "Bash(awk -F'Loss ' 'NR%30==0 {split\\($2,a,\" \"\\); print NR, a[1]}')",
+      "Bash(awk '/^Epoch: \\\\[2\\\\]\\\\[[0-9]+\\\\/4375\\\\]/ { *)",
+      "Bash(awk 'NR%20==0 || NR==1 {print}')"
     ]
   }
 }
