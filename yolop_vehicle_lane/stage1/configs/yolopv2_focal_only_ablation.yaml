@@ -26,13 +26,14 @@ CUDNN:
 
 DRIVE:
   ROOT: '/content/drive/MyDrive/EcoCAR'
-  CHECKPOINT_DIR: '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/checkpoints/yolopv2_focal_only'
-  METRICS_DIR:    '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/metrics/yolopv2_focal_only'
+  CHECKPOINT_DIR: '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/stage1/checkpoints/yolopv2_focal_only'
+  METRICS_DIR:    '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/stage1/metrics/yolopv2_focal_only'
 
 MODEL:
   NAME: 'YOLOPv2'
-  NC: 5
-  VEHICLE_CLASSES: ['car', 'truck', 'bus', 'motorcycle', 'bicycle']
+  # Stage1 strict protocol: 1 merged 'vehicle' class.
+  NC: 1
+  VEHICLE_CLASSES: ['vehicle']
   PRETRAINED: ''
   IMAGE_SIZE: [640, 640]
 
@@ -56,6 +57,7 @@ DATASET:
   TEST_SET: 'val'
   DATA_FORMAT: 'jpg'
   ORG_IMG_SIZE: [720, 1280]
+  CLASS_PROTOCOL: 'stage1_vehicle_merged'
   FLIP: true
   SCALE_FACTOR: 0.5
   ROT_FACTOR: 0

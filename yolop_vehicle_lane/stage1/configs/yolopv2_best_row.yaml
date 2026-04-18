@@ -33,15 +33,17 @@ CUDNN:
 
 DRIVE:
   ROOT: '/content/drive/MyDrive/EcoCAR'
-  # Best-row artefacts live under a dedicated subdir so ablation runs
-  # can land side-by-side without clobbering each other.
-  CHECKPOINT_DIR: '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/checkpoints/yolopv2_best_row'
-  METRICS_DIR:    '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/metrics/yolopv2_best_row'
+  # Stage1 artefacts land under stage1/ subtrees so stage2/3 don't collide.
+  CHECKPOINT_DIR: '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/stage1/checkpoints/yolopv2_best_row'
+  METRICS_DIR:    '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/stage1/metrics/yolopv2_best_row'
 
 MODEL:
   NAME: 'YOLOPv2'
-  NC: 5
-  VEHICLE_CLASSES: ['car', 'truck', 'bus', 'motorcycle', 'bicycle']
+  # Stage1 strict YOLOP-style comparison protocol: car+bus+truck+train
+  # merged into one 'vehicle' class. motorcycle / bicycle NOT included.
+  # See lib/dataset/class_maps.py::STAGE1_VEHICLE_MERGED.
+  NC: 1
+  VEHICLE_CLASSES: ['vehicle']
   PRETRAINED: ''
   IMAGE_SIZE: [640, 640]         # train letterbox target (W, H)
 
@@ -69,6 +71,7 @@ DATASET:
   TEST_SET: 'val'
   DATA_FORMAT: 'jpg'
   ORG_IMG_SIZE: [720, 1280]
+  CLASS_PROTOCOL: 'stage1_vehicle_merged'   # strict YOLOP comparison, 1 class
   # Paper §3 BoF: Mosaic + MixUp in the training path.
   FLIP: true
   SCALE_FACTOR: 0.5

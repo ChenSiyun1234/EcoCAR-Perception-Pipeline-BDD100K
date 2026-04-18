@@ -12,13 +12,18 @@ import numpy as np
 import os
 
 from .AutoDriveDataset import AutoDriveDataset
-from .convert import id_dict, convert
+from .convert import convert
+from .class_maps import build_id_dict
 from tqdm import tqdm
 
 
 class BddDataset(AutoDriveDataset):
     def __init__(self, cfg, is_train, inputsize, transform=None):
         super().__init__(cfg, is_train, inputsize, transform)
+        # Resolve the class taxonomy from cfg.DATASET.CLASS_PROTOCOL.
+        # Stage1 uses 'stage1_vehicle_merged' (strict YOLOP-style: 1 class).
+        # Stage2 can opt in to 'stage2_3c_extended' (adds motorcycle + bicycle).
+        self.id_dict, self.class_names = build_id_dict(cfg)
         self.db = self._get_db()
         self.cfg = cfg
 
@@ -68,7 +73,7 @@ class BddDataset(AutoDriveDataset):
         data = self.filter_data(data)
         for obj in data:
             category = obj['category']
-            if category not in id_dict:
+            if category not in self.id_dict:
                 continue
             box2d = obj.get('box2d', None)
             if box2d is None:
@@ -77,7 +82,7 @@ class BddDataset(AutoDriveDataset):
             y1 = float(box2d['y1'])
             x2 = float(box2d['x2'])
             y2 = float(box2d['y2'])
-            cls_id = float(id_dict[category])
+            cls_id = float(self.id_dict[category])
             box = convert((width, height), (x1, x2, y1, y2))
             gt.append([cls_id, box[0], box[1], box[2], box[3]])
         if not gt:
@@ -148,7 +153,7 @@ class BddDataset(AutoDriveDataset):
     def filter_data(self, data):
         remain = []
         for obj in data:
-            if 'box2d' in obj and obj.get('category') in id_dict:
+            if 'box2d' in obj and obj.get('category') in self.id_dict:
                 remain.append(obj)
         return remain
 

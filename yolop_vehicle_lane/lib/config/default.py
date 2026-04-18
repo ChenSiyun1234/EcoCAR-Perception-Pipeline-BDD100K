@@ -98,6 +98,11 @@ _C.DATASET.LABELROOT = '/content/bdd100k/labels/100k'
 _C.DATASET.LANEROOT = '/content/bdd100k/lane_masks'  # pre-rendered lane masks or packaged dataset root
 _C.DATASET.LANE_DIR_CANDIDATES = ['masks', 'lane_masks']
 _C.DATASET.LABEL_FORMAT = 'auto'  # auto|txt|json
+# Class taxonomy — resolves BDD category names → class IDs. See
+# lib/dataset/class_maps.py. Stage1 uses 'stage1_vehicle_merged'
+# (strict YOLOP-style, 1 class). Stage2 3c variant uses
+# 'stage2_3c_extended' (vehicle + motorcycle + bicycle).
+_C.DATASET.CLASS_PROTOCOL = 'stage1_vehicle_merged'
 _C.DATASET.LANE_JSON_TRAIN = ''  # path to BDD100K lane label JSON for train
 _C.DATASET.LANE_JSON_VAL = ''    # path to BDD100K lane label JSON for val
 _C.DATASET.DATASET = 'BddDataset'
