@@ -79,10 +79,10 @@ class MCnet(nn.Module):
     """
     Multi-task network with shared encoder, detection head, and lane segmentation head.
     """
-    def __init__(self, block_cfg, **kwargs):
+    def __init__(self, block_cfg, nc=5, names=None, **kwargs):
         super(MCnet, self).__init__()
         layers, save = [], []
-        self.nc = 5  # vehicle-only classes
+        self.nc = nc
         self.detector_index = -1
         self.det_out_idx = block_cfg[0][0]
         self.seg_out_idx = block_cfg[0][1:]  # only lane seg index
@@ -92,6 +92,7 @@ class MCnet(nn.Module):
             block = eval(block) if isinstance(block, str) else block
             if block is Detect:
                 self.detector_index = i
+                args = [self.nc] + list(args[1:])
             block_ = block(*args)
             block_.index, block_.from_ = i, from_
             layers.append(block_)
@@ -99,7 +100,10 @@ class MCnet(nn.Module):
         assert self.detector_index == block_cfg[0][0]
 
         self.model, self.save = nn.Sequential(*layers), sorted(save)
-        self.names = [str(i) for i in range(self.nc)]
+        if names is not None and len(names) == self.nc:
+            self.names = list(names)
+        else:
+            self.names = [str(i) for i in range(self.nc)]
 
         # Set stride and anchors for detector
         Detector = self.model[self.detector_index]
@@ -159,7 +163,18 @@ class MCnet(nn.Module):
 def get_net(cfg, **kwargs):
     """Factory function to build the VehicleLane model."""
     m_block_cfg = VehicleLane
-    model = MCnet(m_block_cfg, **kwargs)
+    nc = 5
+    names = None
+    if cfg is not None and cfg is not False:
+        nc = int(getattr(cfg.MODEL, 'NC', 5))
+        try:
+            from lib.dataset.class_maps import build_id_dict
+            _, names = build_id_dict(cfg)
+        except Exception:
+            vc = getattr(cfg.MODEL, 'VEHICLE_CLASSES', None)
+            if vc is not None:
+                names = list(vc)
+    model = MCnet(m_block_cfg, nc=nc, names=names, **kwargs)
     return model
 
 

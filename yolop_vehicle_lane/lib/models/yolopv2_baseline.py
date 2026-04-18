@@ -103,7 +103,7 @@ class MCnetV2(nn.Module):
     with DA removed, ELAN backbone, and a deconvolution lane decoder.
     """
 
-    def __init__(self, block_cfg=None, nc=5, **kwargs):
+    def __init__(self, block_cfg=None, nc=5, names=None, **kwargs):
         super().__init__()
         block_cfg = block_cfg or YOLOPv2Cfg
         self.nc = nc
@@ -117,6 +117,8 @@ class MCnetV2(nn.Module):
                 block = eval(block)
             if isinstance(block, type) and issubclass(block, Detect):
                 self.detector_index = i
+                # Override the hardcoded nc in block_cfg with cfg-driven nc.
+                args = [self.nc] + list(args[1:])
             block_ = block(*args)
             block_.index, block_.from_ = i, from_
             layers.append(block_)
@@ -126,7 +128,10 @@ class MCnetV2(nn.Module):
 
         self.model = nn.Sequential(*layers)
         self.save = sorted(set(save))
-        self.names = [str(i) for i in range(self.nc)]
+        if names is not None and len(names) == self.nc:
+            self.names = list(names)
+        else:
+            self.names = [str(i) for i in range(self.nc)]
 
         # Stride + anchor normalization (YOLOP-style).
         Detector = self.model[self.detector_index]
@@ -220,9 +225,17 @@ class MCnetV2(nn.Module):
 def get_net_yolopv2(cfg=None, **kwargs):
     """Factory for the YOLOPv2-aligned baseline."""
     nc = 5
+    names = None
     if cfg is not None:
         nc = int(getattr(cfg.MODEL, 'NC', 5))
-    return MCnetV2(YOLOPv2Cfg, nc=nc, **kwargs)
+        try:
+            from lib.dataset.class_maps import build_id_dict
+            _, names = build_id_dict(cfg)
+        except Exception:
+            vc = getattr(cfg.MODEL, 'VEHICLE_CLASSES', None)
+            if vc is not None:
+                names = list(vc)
+    return MCnetV2(YOLOPv2Cfg, nc=nc, names=names, **kwargs)
 
 
 if __name__ == '__main__':
