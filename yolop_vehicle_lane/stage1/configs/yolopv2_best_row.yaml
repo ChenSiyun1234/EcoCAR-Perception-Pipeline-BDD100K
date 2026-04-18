@@ -55,8 +55,22 @@ LOSS:
   CLS_POS_WEIGHT: 1.0
   OBJ_POS_WEIGHT: 1.0
   SEG_POS_WEIGHT: 1.0
-  LL_SEG_GAIN: 1.0
-  LL_IOU_GAIN: 0.2
+  LL_SEG_GAIN: 1.0               # focal-BCE weight (paper §3.2 formula 2: γ·L_Focal)
+  # REPAIR (v6): YOLOPv2 paper §3.2 formula 2 defines the lane loss as
+  #     L_lane = L_Dice + γ·L_Focal
+  # with NO IoU term. Our earlier config carried LL_IOU_GAIN=0.2 as a
+  # YOLOP-upstream holdover, which added a third term that does not exist
+  # in the paper. With stage1's 1-class merged-vehicle protocol (NC=1,
+  # so lcls=0 in MultiHeadLoss), the detection-loss gains sum to ~1.05
+  # (OBJ=1.0 + BOX=0.05) while lane summed to ~1.7 (focal 1.0 + dice 0.5
+  # + IoU 0.2) — a 1.6× gradient skew that let the lane head dominate the
+  # shared backbone and collapse it toward an all-background prediction.
+  # That matches the observed run: mAP50 jumped to 0.0777 during warmup
+  # (epoch 1) then collapsed to ~0.0001 once full LR engaged, and lane
+  # IoU stayed at exactly 0 from epoch 0 onward. Setting IoU gain to 0
+  # aligns with Formula 2, removes the extraneous term, and rebalances
+  # lane-vs-detection back toward detection.
+  LL_IOU_GAIN: 0.0
   # Paper §3 BoF: focal loss for det cls/obj.
   FL_GAMMA: 1.5                  # [INFERRED] γ not published; 1.5 = YOLOv5/YOLOP default
   # Paper §3 BoF: focal loss for lane seg.

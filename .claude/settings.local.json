@@ -8,7 +8,12 @@
       "Bash(ls notebooks/)",
       "Bash(rmdir notebooks *)",
       "Bash(rm \"stage1/notebooks/00_rebuild_dataset_and_lane_cache \\(the already runed one\\).ipynb\")",
-      "Bash(rm \"stage1/notebooks/04_modern_backbone_neck_upgrade.ipynb\")"
+      "Bash(rm \"stage1/notebooks/04_modern_backbone_neck_upgrade.ipynb\")",
+      "Bash(output)",
+      "Bash(log\")",
+      "Bash(python -c ' *)",
+      "Bash(pip install *)",
+      "Bash(python -m pip install pypdf --quiet)"
     ]
   }
 }

@@ -44,8 +44,14 @@ LOSS:
   CLS_POS_WEIGHT: 1.0
   OBJ_POS_WEIGHT: 1.0
   SEG_POS_WEIGHT: 1.0
-  LL_SEG_GAIN: 1.0
-  LL_IOU_GAIN: 0.2
+  LL_SEG_GAIN: 1.0               # focal-BCE weight (paper §3.2 formula 2: γ·L_Focal)
+  # REPAIR (v6): see yolopv2_best_row.yaml for the full rationale.
+  # YOLOPv2 paper §3.2 formula 2 specifies L_lane = L_Dice + γ·L_Focal
+  # only — no IoU term. The focal-only ablation row in Table 5 (the row
+  # immediately below the best row) uses the SAME lane-loss structure
+  # with LL_DICE_GAIN=0 as its only delta. Keeping an IoU term here would
+  # change TWO knobs at once and contaminate the ablation.
+  LL_IOU_GAIN: 0.0
   FL_GAMMA: 1.5
   LL_FL_GAMMA: 1.5
   LL_DICE_GAIN: 0.0              # <-- the one knob that differs from the best row
