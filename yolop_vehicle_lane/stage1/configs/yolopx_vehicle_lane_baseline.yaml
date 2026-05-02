@@ -1,10 +1,11 @@
 # Phase-1 YOLOPX baseline adapted for vehicle detection + lane segmentation.
+# Stable RTX PRO 6000 profile: lower AdamW LR, no MixUp, milder geometry, gradient clipping.
 # Drivable-area segmentation is intentionally removed.
 # Detection uses the YOLOPX / YOLOX anchor-free head.
 # Lane segmentation uses YOLOPX's C2-assisted high-resolution lane branch.
 
 GPUS: (0,)
-WORKERS: 8
+WORKERS: 4
 PIN_MEMORY: true
 PRINT_FREQ: 20
 AUTO_RESUME: false
@@ -52,29 +53,29 @@ DATASET:
   ORG_IMG_SIZE: [720, 1280]
   CLASS_PROTOCOL: 'stage1_vehicle_merged'
   FLIP: true
-  SCALE_FACTOR: 0.25
-  ROT_FACTOR: 10
-  TRANSLATE: 0.1
+  SCALE_FACTOR: 0.15
+  ROT_FACTOR: 5
+  TRANSLATE: 0.05
   SHEAR: 0.0
   COLOR_RGB: false
   HSV_H: 0.015
-  HSV_S: 0.7
-  HSV_V: 0.4
+  HSV_S: 0.5
+  HSV_V: 0.3
   MOSAIC: false
   MOSAIC_PROB: 0.5
-  MIXUP: true
-  MIXUP_PROB: 0.05
+  MIXUP: false
+  MIXUP_PROB: 0.0
   LANE_TRAIN_THICKNESS: 8
   LANE_TEST_THICKNESS: 2
 
 TRAIN:
   OPTIMIZER: 'adamw'
-  LR0: 0.001
-  LRF: 0.1
+  LR0: 0.0003
+  LRF: 0.05
   MOMENTUM: 0.937
   WD: 0.0005
   NESTEROV: true
-  WARMUP_EPOCHS: 5.0
+  WARMUP_EPOCHS: 8.0
   WARMUP_BIASE_LR: 0.1
   WARMUP_MOMENTUM: 0.8
   GAMMA1: 0.99
@@ -93,7 +94,7 @@ TRAIN:
   LANE_ONLY: false
   ENC_DET_ONLY: false
   PLOT: false
-  GRAD_CLIP_NORM: 0.0
+  GRAD_CLIP_NORM: 5.0
 
 TEST:
   BATCH_SIZE_PER_GPU: 32

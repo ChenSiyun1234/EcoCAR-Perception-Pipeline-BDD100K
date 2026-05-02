@@ -92,27 +92,43 @@ def train(cfg, train_loader, model, criterion, optimizer, scaler, epoch, num_bat
             outputs = model(input)
             total_loss, head_losses = criterion(outputs, target, shapes, model)
 
+        loss_value = float(total_loss.detach().cpu())
+        if not torch.isfinite(total_loss):
+            if rank in [-1, 0]:
+                logger.warning(f'Non-finite loss at epoch={epoch} iter={i}: {loss_value}. Skipping this batch.')
+            optimizer.zero_grad(set_to_none=True)
+            end = time.time()
+            continue
+
         optimizer.zero_grad(set_to_none=True)
         scaler.scale(total_loss).backward()
         grad_clip = float(getattr(cfg.TRAIN, 'GRAD_CLIP_NORM', 0.0) or 0.0)
         if grad_clip > 0:
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            if rank in [-1, 0] and (not torch.isfinite(grad_norm).item()):
+                logger.warning(f'Non-finite grad norm at epoch={epoch} iter={i}: {float(grad_norm)}. Skipping optimizer step.')
+                optimizer.zero_grad(set_to_none=True)
+                end = time.time()
+                continue
         scaler.step(optimizer)
         scaler.update()
 
         if rank in [-1, 0]:
-            losses.update(total_loss.item(), input.size(0))
+            losses.update(loss_value, input.size(0))
             batch_time.update(time.time() - end)
             if i % cfg.PRINT_FREQ == 0:
                 msg = 'Epoch: [{0}][{1}/{2}]\t' \
                       'Time {batch_time.val:.3f}s ({batch_time.avg:.3f}s)\t' \
                       'Speed {speed:.1f} samples/s\t' \
                       'Data {data_time.val:.3f}s ({data_time.avg:.3f}s)\t' \
+                      'LR {lr:.7f}\t' \
                       'Loss {loss.val:.5f} ({loss.avg:.5f})'.format(
                           epoch, i, len(train_loader), batch_time=batch_time,
                           speed=input.size(0)/max(batch_time.val, 1e-6),
-                          data_time=data_time, loss=losses)
+                          data_time=data_time,
+                          lr=optimizer.param_groups[0]['lr'],
+                          loss=losses)
                 logger.info(msg)
 
                 writer = writer_dict['writer']

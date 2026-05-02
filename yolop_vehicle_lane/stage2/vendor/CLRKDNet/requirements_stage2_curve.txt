@@ -1,0 +1,15 @@
+pandas
+scikit-learn
+opencv-python
+pytorch_warmup
+scikit-image
+tqdm
+p_tqdm
+imgaug>=0.4.0
+Shapely>=1.8.5
+ujson
+yapf
+pathspec
+timm
+albumentations
+ptflops

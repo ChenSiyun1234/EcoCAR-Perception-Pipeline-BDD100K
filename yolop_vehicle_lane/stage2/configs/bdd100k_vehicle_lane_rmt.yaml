@@ -1,0 +1,25 @@
+# Stage-2 RMT-PPAD lane-only dataset configuration.
+# This file assumes Stage-1 produced the local BDD100K vehicle+lane dataset.
+# Required layout:
+#   /content/bdd100k_vehicle5/images/train/*.jpg
+#   /content/bdd100k_vehicle5/images/val/*.jpg
+#   /content/bdd100k_vehicle5/labels/train/*.txt
+#   /content/bdd100k_vehicle5/labels/val/*.txt
+#   /content/bdd100k_vehicle5/mask/lane/train/*.png
+#   /content/bdd100k_vehicle5/mask/lane/val/*.png
+#
+# The script stage2/scripts/00_prepare_rmt_dataset_links.py creates
+# mask/lane/{train,val} links from the existing masks/{train,val} folders.
+
+path: /content/bdd100k_vehicle5
+train: images/train
+val: images/val
+test: images/val
+
+names:
+  0: vehicle
+  1: lane
+
+type_task:
+  detection: [0]
+  segmentation: [1]
