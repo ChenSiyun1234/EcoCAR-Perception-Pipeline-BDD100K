@@ -1,0 +1,21 @@
+OK exp01_rmt_shared_joint.yaml
+  lane_shape=(1, 2, 72, 2) det_shape=(1, 4, 4)
+  lane_loss=3.0537 det_loss=3.4103 grad_cos=0.1435 lambda_lane=0.1000
+OK exp02_rmt_gca_joint.yaml
+  lane_shape=(1, 2, 72, 2) det_shape=(1, 4, 4)
+  lane_loss=2.9943 det_loss=3.3085 grad_cos=0.1073 lambda_lane=0.1056
+  gate_stats={'gate/det_mean': 0.5021247267723083, 'gate/lane_mean': 0.4983915388584137, 'gate/det_sat_low': 0.0, 'gate/det_sat_high': 0.0, 'gate/lane_sat_low': 0.0, 'gate/lane_sat_high': 0.0}
+OK exp03_rmt_gca_clrkd_kd_joint.yaml
+  lane_shape=(1, 2, 72, 2) det_shape=(1, 4, 4)
+  lane_loss=3.2096 det_loss=3.2781 grad_cos=0.2710 lambda_lane=0.0986
+  gate_stats={'gate/det_mean': 0.5013226866722107, 'gate/lane_mean': 0.4958987534046173, 'gate/det_sat_low': 0.0, 'gate/det_sat_high': 0.0, 'gate/lane_sat_low': 0.0, 'gate/lane_sat_high': 0.0}
+OK exp04_yolo26_inspired_joint.yaml
+  lane_shape=(1, 2, 72, 2) det_shape=(1, 4, 4)
+  lane_loss=3.1817 det_loss=3.3455 grad_cos=-0.4594 lambda_lane=0.1775
+OK exp05_yolo26_inspired_global_joint.yaml
+  lane_shape=(1, 2, 72, 2) det_shape=(1, 4, 4)
+  lane_loss=3.1200 det_loss=3.4407 grad_cos=-0.1394 lambda_lane=0.0874
+OK exp06_yolo26_inspired_gca_joint.yaml
+  lane_shape=(1, 2, 72, 2) det_shape=(1, 4, 4)
+  lane_loss=3.1062 det_loss=3.1811 grad_cos=-0.4155 lambda_lane=0.1318
+  gate_stats={'gate/det_mean': 0.5018506646156311, 'gate/lane_mean': 0.5017220377922058, 'gate/det_sat_low': 0.0, 'gate/det_sat_high': 0.0, 'gate/lane_sat_low': 0.0, 'gate/lane_sat_high': 0.0}

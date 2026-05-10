@@ -1,0 +1,156 @@
+run:
+  name: exp41_rmt_gca_anchor_vfl_iou_regression_joint
+  seed: 0
+  work_dir: /content/exp41_rmt_gca_anchor_vfl_iou_regression_joint
+  output_tar: /content/drive/MyDrive/EcoCAR/training_runs/exp41_rmt_gca_anchor_vfl_iou_regression_joint.tar
+dataset:
+  bdd_archive: /content/drive/MyDrive/EcoCAR/datasets/bdd100k_clrkd_curve.tar
+  local_dir: /content/bdd100k_clrkd_curve
+  max_lanes: 10
+  num_points: 72
+  image_size:
+  - 384
+  - 640
+  org_image_size:
+  - 720
+  - 1280
+  aux_mask_size:
+  - 72
+  - 128
+  vehicle_classes:
+  - vehicle
+model:
+  backbone: exp2b_rmt_gca
+  width: 0.5
+  use_aifi: true
+  yolo26:
+    source_root: null
+    model_path: null
+    feature_indices: null
+    strict: true
+  detection_head:
+    type: detr
+    num_queries: 100
+    num_classes: 1
+    embed_dim: 256
+    num_decoder_layers: 3
+    num_heads: 8
+    dim_feedforward: 1024
+  lane_head:
+    type: clrkd
+    embed_dim: 128
+    max_lanes: 10
+    num_points: 72
+    num_priors: 192
+    sample_points: 36
+    roi_refine_layers: 3
+    roi_mid_channels: 48
+    cross_attn_resize:
+    - 10
+    - 25
+    cls_uses_prior_embedding: true
+    prior_embed_encoder_dim: 64
+    cls_separate_path: false
+    mask_size:
+    - 72
+    - 128
+    mask_aux: true
+    num_lane_classes: 7
+loss:
+  det:
+    bbox_loss_weight: 5.0
+    cls_loss_weight: 1.0
+    dn_loss_weight: 0.0
+    giou_loss_weight: 2.0
+    obj_loss_weight: 1.0
+  lambda_gate_reg: 0.001
+  lambda_det: 1.0
+  lambda_lane: 1.0
+  lambda_max: 2.0
+  lambda_min: 0.5
+  lambda_mode: fixed
+  lane:
+    # Exp2QQ: VarifocalLoss (Zhang et al. CVPR 2021) on continuous LineIoU
+    # regression target. The 7-experiment cls collapse (NB39-NB45) was
+    # caused by focal alpha=0.25 setting positives at 25% weight while
+    # negatives got 75%. With our 5:187 pos:neg ratio per image, that
+    # creates a degenerate equilibrium where sigmoid converges to ~0.578
+    # for ALL priors (verified by closed-form math: VFL alpha=0.25 +
+    # gamma_neg=4 + clip=0.05 produces zero gradient at sigmoid ~0.5).
+    #
+    # VFL flips the asymmetry: positives weighted by target IoU (no
+    # `(1-alpha)` discount), negatives weighted by alpha * pred^gamma so
+    # only confident-wrong negatives count. Combined with the IoU
+    # regression target, this is the published RTMDet recipe for moderate
+    # imbalance (1:30 to 1:100).
+    cls_target_type: lineiou_regression
+    cls_loss_type: vfl
+    vfl_alpha: 0.75
+    vfl_gamma: 2.0
+    lineiou_target_pow: 1.0
+    cls_ohem_topk_per_pos: 0
+    cls_balance_mode: balanced
+    line_iou_radius: 0.015
+    w_cls: 5.0
+    w_distill: 0.0
+    w_iou: 2.0
+    w_mask: 1.0
+    w_reg: 1.2
+    w_smooth: 0.05
+    w_xytl: 0.2
+    use_lane_matching: true
+    match_cost_cls: 1.0
+    match_cost_point: 5.0
+    match_cost_iou: 2.0
+    match_cost_xytl: 0.2
+    lane_assigner: dynamic_k
+    dynamic_k_topk: 4
+    aux_stage_loss_weight: 1.0
+    stage1_aux_loss_weight: 0.0
+    # Back-compat knobs (unused with cls_loss_type=vfl).
+    asl_gamma_pos: 0.0
+    asl_gamma_neg: 4.0
+    asl_clip: 0.05
+    focal_alpha: 0.25
+    focal_gamma: 2.0
+    qfl_gamma: 2.0
+  no_object_weight: 0.25
+  use_uncertainty: true
+  geometry_warmup_epochs: 1
+train:
+  lr0: 0.0002
+  backbone_lr_mult: 0.1
+  head_lr_mult: 2.0
+  weight_decay: 0.0005
+  end_epoch: 20
+  batch_size: 8
+  workers: 2
+  grad_clip_norm: 5.0
+  val_every: 1
+  save_every: 5
+  print_every: 5
+  amp:
+    kind: bfloat16
+  lr_scheduler:
+    kind: cosine
+    warmup_epochs: 2
+    warmup_start_lr_factor: 0.1
+    min_lr_factor: 0.05
+  phases:
+  - name: head_warmup
+    until_epoch: 2
+  - name: full_finetune
+    until_epoch: 999
+eval:
+  val_batches: 40
+  log_grad_cosine: true
+  grad_cos_probe_interval: 50
+  lane_exist_threshold: 0.3
+  decoded_top_k: 6
+  decoded_lane_iou_threshold: 0.5
+  decoded_lane_nms_iou: 0.5
+  decoded_score_threshold: 0.0
+  decoded_score_source: cls
+  decoded_oracle_enabled: true
+teacher:
+  lane_head_checkpoint: null

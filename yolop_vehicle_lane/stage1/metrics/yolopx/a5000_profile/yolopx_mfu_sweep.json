@@ -1,0 +1,50 @@
+[
+  {
+    "batch": 1,
+    "latency_ms": 22.708943499935685,
+    "throughput_fps": 44.03551402568914,
+    "achieved_tflops": 6.086098836979863,
+    "mfu_pct": 5.478036756957573,
+    "peak_mem_mb": 531.80517578125
+  },
+  {
+    "batch": 2,
+    "latency_ms": 22.22847650006088,
+    "throughput_fps": 89.97467730163704,
+    "achieved_tflops": 12.435298894516812,
+    "mfu_pct": 11.192888293894521,
+    "peak_mem_mb": 612.4033203125
+  },
+  {
+    "batch": 4,
+    "latency_ms": 34.94631899997103,
+    "throughput_fps": 114.4612684386964,
+    "achieved_tflops": 15.819563098947798,
+    "mfu_pct": 14.239030692122231,
+    "peak_mem_mb": 778.1787109375
+  },
+  {
+    "batch": 8,
+    "latency_ms": 74.86439749999363,
+    "throughput_fps": 106.85987287883644,
+    "achieved_tflops": 14.768982773047684,
+    "mfu_pct": 13.293413837126627,
+    "peak_mem_mb": 1109.666015625
+  },
+  {
+    "batch": 16,
+    "latency_ms": 166.59068400002752,
+    "throughput_fps": 96.0437859778363,
+    "achieved_tflops": 13.274103574625064,
+    "mfu_pct": 11.947888005963154,
+    "peak_mem_mb": 1774.3759765625
+  },
+  {
+    "batch": 32,
+    "latency_ms": 350.7943605000037,
+    "throughput_fps": 91.22153490263896,
+    "achieved_tflops": 12.607625680367669,
+    "mfu_pct": 11.347997912122114,
+    "peak_mem_mb": 3101.7802734375
+  }
+]

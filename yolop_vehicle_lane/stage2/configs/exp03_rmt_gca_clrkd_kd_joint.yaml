@@ -1,0 +1,97 @@
+run:
+  name: exp03_rmt_gca_clrkd_kd_joint
+  seed: 0
+  work_dir: /content/exp03_rmt_gca_clrkd_kd_joint
+  output_tar: /content/drive/MyDrive/EcoCAR/training_runs/exp03_rmt_gca_clrkd_kd_joint.tar
+dataset:
+  bdd_archive: /content/drive/MyDrive/EcoCAR/datasets/bdd100k_clrkd_curve.tar
+  local_dir: /content/bdd100k_clrkd_curve
+  max_lanes: 10
+  num_points: 72
+  image_size:
+  - 384
+  - 640
+  org_image_size:
+  - 720
+  - 1280
+  aux_mask_size:
+  - 72
+  - 128
+  vehicle_classes:
+  - vehicle
+model:
+  backbone: exp2c_rmt_gca_kd
+  width: 0.5
+  use_aifi: true
+  yolo26:
+    source_root: null
+    model_path: null
+    feature_indices: null
+    strict: true
+  detection_head:
+    type: detr
+    num_queries: 100
+    num_classes: 1
+    embed_dim: 256
+    num_decoder_layers: 3
+    num_heads: 8
+    dim_feedforward: 1024
+  lane_head:
+    embed_dim: 128
+    max_lanes: 10
+    num_points: 72
+    num_priors: 192
+    mask_size:
+    - 72
+    - 128
+    mask_aux: true
+    num_lane_classes: 7
+loss:
+  det:
+    bbox_loss_weight: 5.0
+    cls_loss_weight: 1.0
+    dn_loss_weight: 0.0
+    giou_loss_weight: 2.0
+    obj_loss_weight: 1.0
+  lambda_gate_reg: 0.001
+  lambda_lane: 0.3
+  lambda_max: 2.0
+  lambda_min: 0.05
+  lambda_mode: grad_norm_calibration
+  lane:
+    focal_alpha: 0.25
+    focal_gamma: 2.0
+    line_iou_radius: 0.015
+    w_cls: 2.0
+    w_distill: 0.1
+    w_iou: 2.0
+    w_mask: 1.0
+    w_reg: 0.5
+    w_smooth: 0.05
+    w_xytl: 0.2
+  no_object_weight: 0.25
+  use_uncertainty: false
+train:
+  lr0: 0.0002
+  backbone_lr_mult: 0.1
+  head_lr_mult: 2.0
+  weight_decay: 0.0005
+  end_epoch: 10
+  batch_size: 8
+  workers: 2
+  grad_clip_norm: 5.0
+  val_every: 1
+  save_every: 5
+  print_every: 10
+  phases:
+  - name: head_warmup
+    until_epoch: 1
+  - name: adapter_warmup
+    until_epoch: 3
+  - name: full_finetune
+    until_epoch: 999
+eval:
+  val_batches: 25
+  log_grad_cosine: true
+teacher:
+  lane_head_checkpoint: /content/drive/MyDrive/EcoCAR/training_runs/clrkd_lane_teacher_best.pt

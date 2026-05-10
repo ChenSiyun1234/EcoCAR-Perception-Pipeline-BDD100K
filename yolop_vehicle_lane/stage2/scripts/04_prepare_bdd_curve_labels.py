@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import zipfile
+import tarfile
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -23,6 +24,15 @@ KNOWN_LANE_SUBTYPES = {
     "single other",
     "single white",
     "single yellow",
+}
+LANE_TRAIN_CATS = {
+    "lane/double other",
+    "lane/double white",
+    "lane/double yellow",
+    "lane/road curb",
+    "lane/single other",
+    "lane/single white",
+    "lane/single yellow",
 }
 
 
@@ -101,6 +111,8 @@ def normalize_lane_category(label: dict) -> Optional[str]:
             if subtype in joined:
                 normalized = f"lane/{subtype}"
                 break
+    if normalized not in LANE_TRAIN_CATS:
+        return None
     return normalized
 
 
@@ -320,9 +332,9 @@ def safe_extract_zip(zip_path: Path, dest: Path) -> None:
     ensure_dir(dest)
     marker = dest / f".extracted_{zip_path.stem}.ok"
     if marker.exists():
-        print(f"Already extracted: {zip_path} -> {dest}")
+        print(f"Already extracted: {zip_path} -> {dest}", flush=True)
         return
-    print(f"Extracting {zip_path} -> {dest}")
+    print(f"Extracting {zip_path} -> {dest}", flush=True)
     with zipfile.ZipFile(zip_path, "r") as z:
         z.extractall(dest)
     marker.write_text(str(zip_path), encoding="utf-8")
@@ -418,7 +430,7 @@ def maybe_extract_official_zips(raw_root: Path, downloads_root: Path, need_image
         except FileNotFoundError:
             safe_extract_zip(label_zip, raw_root)
     else:
-        print(f"No labels zip found under {downloads_root}; assuming labels are already extracted.")
+        print(f"No labels zip found under {downloads_root}; assuming labels are already extracted.", flush=True)
 
     if need_images:
         image_zip = find_zip(downloads_root, ["bdd100k_images_100k.zip", "*images*100k*.zip"])
@@ -429,7 +441,7 @@ def maybe_extract_official_zips(raw_root: Path, downloads_root: Path, need_image
             except FileNotFoundError:
                 safe_extract_zip(image_zip, raw_root)
         else:
-            print(f"No image zip found under {downloads_root}; assuming images are already available.")
+            print(f"No image zip found under {downloads_root}; assuming images are already available.", flush=True)
 
 
 def write_lines_file(path: Path, lanes: list[np.ndarray]) -> None:
@@ -465,6 +477,98 @@ def image_shape(path: Path) -> tuple[int, int]:
     return int(width), int(height)
 
 
+
+
+VEHICLE_CATEGORIES = {"car", "truck", "bus", "motorcycle", "bicycle", "train"}
+
+
+def locate_detection_label_source(dataset_root: Path, raw_root: Path, split: str) -> Optional[Path]:
+    candidates = [
+        dataset_root / "labels" / split,
+        dataset_root / split / "labels",
+        raw_root / "labels" / "100k" / split,
+        raw_root / "bdd100k" / "labels" / "100k" / split,
+        raw_root / "100k" / split,
+    ]
+    for candidate in candidates:
+        if candidate.is_dir() and any(p.suffix.lower() in {".txt", ".json"} for p in candidate.iterdir() if p.is_file()):
+            return candidate
+    scored = []
+    for path in raw_root.rglob("*"):
+        if not path.is_dir() or path.name.lower() != split:
+            continue
+        label_count = sum(1 for p in path.iterdir() if p.is_file() and p.suffix.lower() in {".txt", ".json"})
+        if label_count < 1:
+            continue
+        score = label_count
+        text = norm_path(path)
+        if "labels" in text:
+            score += 100000
+        if "100k" in text:
+            score += 50000
+        scored.append((score, path))
+    if not scored:
+        return None
+    return sorted(scored, key=lambda item: (-item[0], str(item[1])))[0][1]
+
+
+def convert_box(width: int, height: int, box2d: dict) -> tuple[float, float, float, float]:
+    x1 = float(box2d.get("x1", 0.0))
+    y1 = float(box2d.get("y1", 0.0))
+    x2 = float(box2d.get("x2", 0.0))
+    y2 = float(box2d.get("y2", 0.0))
+    x1 = max(0.0, min(float(width - 1), x1))
+    x2 = max(0.0, min(float(width - 1), x2))
+    y1 = max(0.0, min(float(height - 1), y1))
+    y2 = max(0.0, min(float(height - 1), y2))
+    bw = max(0.0, x2 - x1)
+    bh = max(0.0, y2 - y1)
+    cx = x1 + bw * 0.5
+    cy = y1 + bh * 0.5
+    return cx / float(width), cy / float(height), bw / float(width), bh / float(height)
+
+
+def extract_vehicle_boxes_from_record(record: dict, width: int, height: int) -> list[str]:
+    rows = []
+    for obj in iter_candidate_objects(record):
+        category = str(obj.get("category", "") or "").lower().strip()
+        if category not in VEHICLE_CATEGORIES:
+            continue
+        box2d = obj.get("box2d")
+        if not isinstance(box2d, dict):
+            continue
+        xc, yc, bw, bh = convert_box(width, height, box2d)
+        if bw <= 0.0 or bh <= 0.0:
+            continue
+        rows.append(f"0 {xc:.8f} {yc:.8f} {bw:.8f} {bh:.8f}")
+    return rows
+
+
+def write_detection_label(image_path: Path, label_source: Optional[Path], out_label_path: Path) -> int:
+    ensure_dir(out_label_path.parent)
+    if label_source is None:
+        out_label_path.write_text("", encoding="utf-8")
+        return 0
+    txt_path = label_source / f"{image_path.stem}.txt"
+    if txt_path.exists():
+        text = txt_path.read_text(encoding="utf-8")
+        out_label_path.write_text(text, encoding="utf-8")
+        return sum(1 for row in text.splitlines() if row.strip())
+    json_path = label_source / f"{image_path.stem}.json"
+    if json_path.exists():
+        width, height = image_shape(image_path)
+        try:
+            record = json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception:
+            out_label_path.write_text("", encoding="utf-8")
+            return 0
+        rows = extract_vehicle_boxes_from_record(record, width, height)
+        out_label_path.write_text("\n".join(rows) + ("\n" if rows else ""), encoding="utf-8")
+        return len(rows)
+    out_label_path.write_text("", encoding="utf-8")
+    return 0
+
+
 def prepare_split(dataset_root: Path, raw_root: Path, output_root: Path, split: str, lane_source_arg: Optional[str], mask_thickness: int) -> dict[str, int | str]:
     image_dir = locate_image_dir(dataset_root, raw_root, split)
     lane_source = Path(lane_source_arg) if lane_source_arg else locate_lane_source(raw_root, split)
@@ -472,12 +576,16 @@ def prepare_split(dataset_root: Path, raw_root: Path, output_root: Path, split: 
 
     out_image_dir = ensure_dir(output_root / "images" / split)
     out_mask_dir = ensure_dir(output_root / "masks" / split)
+    out_label_dir = ensure_dir(output_root / "labels" / split)
     out_list_dir = ensure_dir(output_root / "list")
+    det_label_source = locate_detection_label_source(dataset_root, raw_root, split)
 
     image_paths = sorted([p for p in image_dir.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES])
     list_rows = []
     with_lanes = 0
     total_lanes = 0
+    frames_with_det = 0
+    total_boxes = 0
 
     for image_path in image_paths:
         lanes = lane_records.get(image_path.name, [])
@@ -492,6 +600,10 @@ def prepare_split(dataset_root: Path, raw_root: Path, output_root: Path, split: 
         width, height = image_shape(image_path)
         mask_path = out_mask_dir / f"{image_path.stem}.png"
         write_mask(mask_path, lanes, width, height, mask_thickness)
+        det_count = write_detection_label(image_path, det_label_source, out_label_dir / f"{image_path.stem}.txt")
+        if det_count > 0:
+            frames_with_det += 1
+            total_boxes += det_count
 
         rel_image = "/" + str(out_image.relative_to(output_root)).replace("\\", "/")
         rel_mask = "/" + str(mask_path.relative_to(output_root)).replace("\\", "/")
@@ -511,25 +623,43 @@ def prepare_split(dataset_root: Path, raw_root: Path, output_root: Path, split: 
         "frames_with_lanes": with_lanes,
         "lane_instances": total_lanes,
         "lane_json_records": len(lane_records),
+        "frames_with_detection": frames_with_det,
+        "vehicle_boxes": total_boxes,
+        "detection_label_source": str(det_label_source) if det_label_source is not None else "NONE",
         "lane_source": str(lane_source),
         "image_source": str(image_dir),
     }
+
+
+def pack_output_root(output_root: Path, pack_to: Path) -> None:
+    ensure_dir(pack_to.parent)
+    if pack_to.exists():
+        pack_to.unlink()
+    with tarfile.open(pack_to, "w", dereference=True) as tar:
+        for name in ["images", "labels", "masks", "list", "prepare_summary.json"]:
+            item = output_root / name
+            if item.exists():
+                tar.add(item, arcname=name)
+    print(f"Packed CLRKD curve dataset to {pack_to}", flush=True)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare BDD100K lane curve labels for CLRKDNet-style training.")
     parser.add_argument("--dataset-root", default="/content/bdd100k_vehicle5", help="Stage-1 dataset root if available.")
     parser.add_argument("--raw-root", default="/content/bdd100k_raw", help="Extracted BDD100K labels/images root.")
+    parser.add_argument("--bdd-images", default=None, help="Deprecated alias. If supplied, it is treated as an additional dataset-root candidate.")
+    parser.add_argument("--bdd-labels", default=None, help="Deprecated alias. If supplied, it is treated as raw-root.")
     parser.add_argument("--downloads-root", default="/content/drive/MyDrive/EcoCAR/downloads", help="Official BDD100K zip archive directory.")
     parser.add_argument("--auto-extract", action="store_true", help="Extract official labels/images zips from downloads-root if needed.")
     parser.add_argument("--output-root", default="/content/bdd100k_clrkd_curve", help="Output root for CLRKDNet-compatible curve dataset.")
     parser.add_argument("--train-lane-json", default=None, help="Optional train lane JSON directory or consolidated file.")
     parser.add_argument("--val-lane-json", default=None, help="Optional val lane JSON directory or consolidated file.")
     parser.add_argument("--mask-thickness", type=int, default=5, help="Auxiliary binary lane mask thickness in original image pixels.")
+    parser.add_argument("--pack-to", default=None, help="Optional tar archive path to write after dataset preparation.")
     args = parser.parse_args()
 
-    dataset_root = Path(args.dataset_root)
-    raw_root = Path(args.raw_root)
+    dataset_root = Path(args.bdd_images) if args.bdd_images else Path(args.dataset_root)
+    raw_root = Path(args.bdd_labels) if args.bdd_labels else Path(args.raw_root)
     downloads_root = Path(args.downloads_root)
     output_root = ensure_dir(args.output_root)
 
@@ -552,7 +682,9 @@ def main() -> None:
         "format": "CLRKDNet/CULane-style: image symlinks, .lines.txt curve files, list/train_gt.txt, list/val.txt, and auxiliary masks generated from curves.",
     }
     (output_root / "prepare_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    print(json.dumps(summary, indent=2))
+    print(json.dumps(summary, indent=2), flush=True)
+    if args.pack_to:
+        pack_output_root(output_root, Path(args.pack_to))
 
 
 if __name__ == "__main__":

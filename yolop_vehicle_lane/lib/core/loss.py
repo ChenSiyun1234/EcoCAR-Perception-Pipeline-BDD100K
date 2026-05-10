@@ -12,7 +12,69 @@ Lambda order: [cls, obj, iou, ll_seg, ll_iou] - 5 elements
 import torch
 import torch.nn as nn
 from .general import bbox_iou
-from .postprocess import build_targets
+
+try:
+    from .postprocess import build_targets
+except Exception as exc:
+    _POSTPROCESS_IMPORT_ERROR = exc
+
+    def build_targets(cfg, predictions, targets, model):
+        """Fallback target builder used only when lib/core/postprocess.py is unavailable.
+
+        Colab/Drive can occasionally expose a stale or partially refreshed project tree.
+        Stage-1 evaluation only needs the YOLO-style target builder, so keeping a local
+        fallback prevents `from lib.core import get_loss` from failing before the notebook
+        has a chance to print a useful preflight message.
+        """
+        try:
+            from lib.utils import is_parallel
+        except Exception:
+            def is_parallel(m):
+                return hasattr(m, 'module')
+
+        det = model.module.model[model.module.detector_index] if is_parallel(model) else model.model[model.detector_index]
+        na, nt = det.na, targets.shape[0]
+        tcls, tbox, indices, anch = [], [], [], []
+        gain = torch.ones(7, device=targets.device)
+        ai = torch.arange(na, device=targets.device).float().view(na, 1).repeat(1, nt)
+        targets = torch.cat((targets.repeat(na, 1, 1), ai[:, :, None]), 2)
+
+        g = 0.5
+        off = torch.tensor([[0, 0], [1, 0], [0, 1], [-1, 0], [0, -1]], device=targets.device).float() * g
+
+        for i in range(det.nl):
+            anchors = det.anchors[i]
+            gain[2:6] = torch.tensor(predictions[i].shape, device=targets.device)[[3, 2, 3, 2]]
+            t = targets * gain
+
+            if nt:
+                r = t[:, :, 4:6] / anchors[:, None]
+                keep = torch.max(r, 1.0 / r).max(2)[0] < cfg.TRAIN.ANCHOR_THRESHOLD
+                t = t[keep]
+                gxy = t[:, 2:4]
+                gxi = gain[[2, 3]] - gxy
+                j, k = ((gxy % 1.0 < g) & (gxy > 1.0)).T
+                l, m = ((gxi % 1.0 < g) & (gxi > 1.0)).T
+                mask = torch.stack((torch.ones_like(j), j, k, l, m))
+                t = t.repeat((5, 1, 1))[mask]
+                offsets = (torch.zeros_like(gxy)[None] + off[:, None])[mask]
+            else:
+                t = targets[0]
+                offsets = 0
+
+            b, c = t[:, :2].long().T
+            gxy = t[:, 2:4]
+            gwh = t[:, 4:6]
+            gij = (gxy - offsets).long()
+            gi, gj = gij.T
+            a = t[:, 6].long()
+            gj = gj.clamp_(0, int(gain[3].item()) - 1)
+            gi = gi.clamp_(0, int(gain[2].item()) - 1)
+            indices.append((b, a, gj, gi))
+            tbox.append(torch.cat((gxy - gij, gwh), 1))
+            anch.append(anchors[a])
+            tcls.append(c)
+        return tcls, tbox, indices, anch
 
 
 class MultiHeadLoss(nn.Module):

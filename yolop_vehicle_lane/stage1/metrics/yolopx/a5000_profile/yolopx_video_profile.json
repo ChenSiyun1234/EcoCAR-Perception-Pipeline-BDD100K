@@ -1,0 +1,35 @@
+{
+  "config": "YOLOPX",
+  "checkpoint": "/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/stage1/checkpoints/yolopx/best_joint.pth",
+  "frames_processed": 2829,
+  "mean_latency_ms": 27.903175033932897,
+  "median_latency_ms": 27.58487799997056,
+  "uncapped_pipeline_fps": 35.838215499989,
+  "source_video_fps": 30.0,
+  "writer_fps": 35.838215499989,
+  "conf_thres_primary": 0.6,
+  "conf_sweep": [
+    0.25,
+    0.1,
+    0.05,
+    0.01
+  ],
+  "adaptive_conf_usage": {
+    "0.1": 2433,
+    "0.05": 304,
+    "0.01": 92
+  },
+  "mean_used_conf_thres": 0.0917002474372548,
+  "track_iou": 0.45,
+  "nms_agnostic": true,
+  "close_vehicle_cleanup": true,
+  "close_object_area_ratio": 0.025,
+  "fragment_containment_threshold": 0.58,
+  "output_video": "/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/stage1/metrics/yolopx/a5000_profile/yolopx_inference_output.mp4",
+  "raw_nms_detections": 12702,
+  "kept_after_area_filter": 12702,
+  "cleanup_input_boxes": 12702,
+  "cleanup_output_boxes": 11668,
+  "cleanup_suppressed_fragments": 1034,
+  "drawn_boxes": 21042
+}

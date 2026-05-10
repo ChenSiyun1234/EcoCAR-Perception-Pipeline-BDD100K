@@ -1,0 +1,160 @@
+run:
+  name: exp36_rmt_gca_anchor_iou_regression_joint
+  seed: 0
+  work_dir: /content/exp36_rmt_gca_anchor_iou_regression_joint
+  output_tar: /content/drive/MyDrive/EcoCAR/training_runs/exp36_rmt_gca_anchor_iou_regression_joint.tar
+dataset:
+  bdd_archive: /content/drive/MyDrive/EcoCAR/datasets/bdd100k_clrkd_curve.tar
+  local_dir: /content/bdd100k_clrkd_curve
+  max_lanes: 10
+  num_points: 72
+  image_size:
+  - 384
+  - 640
+  org_image_size:
+  - 720
+  - 1280
+  aux_mask_size:
+  - 72
+  - 128
+  vehicle_classes:
+  - vehicle
+model:
+  backbone: exp2b_rmt_gca
+  width: 0.5
+  use_aifi: true
+  yolo26:
+    source_root: null
+    model_path: null
+    feature_indices: null
+    strict: true
+  detection_head:
+    type: detr
+    num_queries: 100
+    num_classes: 1
+    embed_dim: 256
+    num_decoder_layers: 3
+    num_heads: 8
+    dim_feedforward: 1024
+  lane_head:
+    type: clrkd
+    embed_dim: 128
+    max_lanes: 10
+    num_points: 72
+    num_priors: 192
+    sample_points: 36
+    roi_refine_layers: 3
+    roi_mid_channels: 48
+    cross_attn_resize:
+    - 10
+    - 25
+    cls_uses_prior_embedding: true
+    prior_embed_encoder_dim: 64
+    cls_separate_path: false
+    mask_size:
+    - 72
+    - 128
+    mask_aux: true
+    num_lane_classes: 7
+loss:
+  det:
+    bbox_loss_weight: 5.0
+    cls_loss_weight: 1.0
+    dn_loss_weight: 0.0
+    giou_loss_weight: 2.0
+    obj_loss_weight: 1.0
+  lambda_gate_reg: 0.001
+  lambda_det: 1.0
+  lambda_lane: 1.0
+  lambda_max: 2.0
+  lambda_min: 0.5
+  lambda_mode: fixed
+  lane:
+    # Exp2LL: switch from binary {0, 1} matched_existence to continuous LineIoU
+    # regression target on the 192-anchor head. NB39/NB40 confirmed the anchor
+    # head has the project's all-time best geometry (matched_iou=0.483) but the
+    # cls task collapses: with only 5/192 priors matched per image, both plain
+    # focal (NB39) and ASL gamma_neg=4 (NB40) produced pred_lanes=1536 = ALL
+    # priors above the 0.3 decode threshold. The binary task is not separable
+    # because the same prior is positive in some batches and negative in others
+    # depending on which competing priors win the IoU contest. Continuous IoU
+    # regression replaces this matching-instability with a deterministic per-
+    # prior target (the prior's CURRENT max LineIoU vs any GT lane) and lets
+    # the cls head's output BE the ranking score at inference.
+    cls_target_type: lineiou_regression
+    # QFL weights BCE by |target - pred|^gamma so easy negatives (target ~ 0,
+    # pred ~ 0) get near-zero gradient. Without QFL, plain BCE has the same
+    # 187:5 imbalance problem that broke Exp2K.
+    cls_loss_type: qfl
+    qfl_gamma: 2.0
+    # Compress high-IoU range, expand low-IoU range so even priors with weak
+    # geometry still get meaningful gradient. Without this, ~5 priors have
+    # target near 1.0 and 187 have target ~ 0 with very narrow band of
+    # in-between targets, so QFL still struggles to push the medium-good priors.
+    lineiou_target_pow: 1.0
+    cls_ohem_topk_per_pos: 0
+    cls_balance_mode: balanced
+    line_iou_radius: 0.015
+    # Bump w_cls 4 -> 5 to match QFL's typical scale on this dataset (~5x
+    # smaller than ASL with comparable gamma).
+    w_cls: 5.0
+    w_distill: 0.0
+    w_iou: 2.0
+    w_mask: 1.0
+    w_reg: 1.2
+    w_smooth: 0.05
+    w_xytl: 0.2
+    use_lane_matching: true
+    match_cost_cls: 1.0
+    match_cost_point: 5.0
+    match_cost_iou: 2.0
+    match_cost_xytl: 0.2
+    lane_assigner: dynamic_k
+    dynamic_k_topk: 4
+    aux_stage_loss_weight: 1.0
+    stage1_aux_loss_weight: 0.0
+    # Back-compat: ASL knobs still defined but cls_loss_type=qfl ignores them.
+    asl_gamma_pos: 0.0
+    asl_gamma_neg: 4.0
+    asl_clip: 0.05
+    focal_alpha: 0.25
+    focal_gamma: 2.0
+  no_object_weight: 0.25
+  use_uncertainty: true
+  geometry_warmup_epochs: 1
+train:
+  lr0: 0.0002
+  backbone_lr_mult: 0.1
+  head_lr_mult: 2.0
+  weight_decay: 0.0005
+  end_epoch: 20
+  batch_size: 8
+  workers: 2
+  grad_clip_norm: 5.0
+  val_every: 1
+  save_every: 5
+  print_every: 5
+  amp:
+    kind: bfloat16
+  lr_scheduler:
+    kind: cosine
+    warmup_epochs: 2
+    warmup_start_lr_factor: 0.1
+    min_lr_factor: 0.05
+  phases:
+  - name: head_warmup
+    until_epoch: 2
+  - name: full_finetune
+    until_epoch: 999
+eval:
+  val_batches: 40
+  log_grad_cosine: true
+  grad_cos_probe_interval: 50
+  lane_exist_threshold: 0.3
+  decoded_top_k: 4
+  decoded_lane_iou_threshold: 0.5
+  decoded_lane_nms_iou: 0.5
+  decoded_score_threshold: 0.0
+  decoded_oracle_enabled: true
+teacher:
+  lane_head_checkpoint: null

@@ -1,0 +1,60 @@
+# Stage 2 — Experiment 2 — In-house CLRKD curve lane-only baseline.
+# This is the lightweight fusion-module path that uses
+# stage2/fusion/{lane_head, losses, lane_targets}.py (NOT the vendored
+# CLRKDNet trainer). Exists so we can A/B the in-house head vs the
+# upstream CLRHead before plugging into the fusion model.
+
+run:
+  name: stage2_clrkd_curve_baseline
+  drive_root: /content/drive/MyDrive/EcoCAR
+  output_tar: /content/drive/MyDrive/EcoCAR/training_runs/stage2_clrkd_lane_only.tar
+
+dataset:
+  bdd_archive: /content/drive/MyDrive/EcoCAR/datasets/bdd100k_clrkd_curve.tar
+  local_dir: /content/bdd100k_clrkd_curve
+  splits: [train, val]
+  max_lanes: 10
+  num_points: 72
+  image_size: [384, 640]   # H, W
+  org_image_size: [720, 1280]
+  aux_mask_size: [72, 128]
+
+model:
+  backbone: csp_yolop_lite     # csp_yolop_lite | rmt_resnet | yolo26
+  feature_channels: [128, 256, 512]
+  lane_head:
+    embed_dim: 128
+    max_lanes: 10
+    num_points: 72
+    mask_size: [72, 128]
+    mask_aux: true
+    num_lane_classes: 7
+
+loss:
+  use_uncertainty: false
+  lambda_lane: 1.0
+  w_cls: 2.0
+  w_reg: 0.5
+  w_iou: 2.0
+  w_mask: 1.0
+  w_smooth: 0.05
+  w_distill: 0.0
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+  line_iou_radius: 0.015
+
+train:
+  optimizer: adamw
+  lr0: 3.0e-4
+  weight_decay: 5.0e-4
+  warmup_epochs: 3
+  end_epoch: 30
+  batch_size: 32
+  workers: 4
+  grad_clip_norm: 5.0
+  val_every: 1
+  save_every: 5
+
+eval:
+  conf_threshold: 0.4
+  curve_match_radius: 0.015

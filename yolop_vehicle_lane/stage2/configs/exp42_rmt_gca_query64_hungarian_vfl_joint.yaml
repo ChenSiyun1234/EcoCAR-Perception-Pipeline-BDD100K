@@ -1,0 +1,150 @@
+run:
+  name: exp42_rmt_gca_query64_hungarian_vfl_joint
+  seed: 0
+  work_dir: /content/exp42_rmt_gca_query64_hungarian_vfl_joint
+  output_tar: /content/drive/MyDrive/EcoCAR/training_runs/exp42_rmt_gca_query64_hungarian_vfl_joint.tar
+dataset:
+  bdd_archive: /content/drive/MyDrive/EcoCAR/datasets/bdd100k_clrkd_curve.tar
+  local_dir: /content/bdd100k_clrkd_curve
+  max_lanes: 10
+  num_points: 72
+  image_size:
+  - 384
+  - 640
+  org_image_size:
+  - 720
+  - 1280
+  aux_mask_size:
+  - 72
+  - 128
+  vehicle_classes:
+  - vehicle
+model:
+  backbone: exp2b_rmt_gca
+  width: 0.5
+  use_aifi: true
+  yolo26:
+    source_root: null
+    model_path: null
+    feature_indices: null
+    strict: true
+  detection_head:
+    type: detr
+    num_queries: 100
+    num_classes: 1
+    embed_dim: 256
+    num_decoder_layers: 3
+    num_heads: 8
+    dim_feedforward: 1024
+  lane_head:
+    # Exp2RR: abandon the 192-anchor design. Use DETR-style learned
+    # queries that don't have geometric priors -- each query specializes
+    # via cross-attention. K=64 (vs LaneQueryHead default K=12) is large
+    # enough to cover up to 64 lanes per image (mean 5.81 from dataset
+    # visualization, max 10 after max_lanes=10 truncation) and provides a
+    # rich pool for Hungarian 1-to-1 matching to assign distinct queries
+    # to distinct GT lanes. Compared to NB22's K=12 LaneQueryHead which
+    # only had 12 candidates for 5+ lanes, K=64 gives the matcher enough
+    # slack to learn discriminative queries.
+    type: query
+    embed_dim: 128
+    max_lanes: 10
+    num_points: 72
+    num_queries: 64
+    num_decoder_layers: 3
+    num_heads: 8
+    dim_feedforward: 512
+    dropout: 0.1
+    mask_size:
+    - 72
+    - 128
+    mask_aux: true
+    num_lane_classes: 7
+loss:
+  det:
+    bbox_loss_weight: 5.0
+    cls_loss_weight: 1.0
+    dn_loss_weight: 0.0
+    giou_loss_weight: 2.0
+    obj_loss_weight: 1.0
+  lambda_gate_reg: 0.001
+  lambda_det: 1.0
+  lambda_lane: 1.0
+  lambda_max: 2.0
+  lambda_min: 0.5
+  lambda_mode: fixed
+  lane:
+    cls_target_type: matched_existence
+    cls_loss_type: vfl
+    vfl_alpha: 0.75
+    vfl_gamma: 2.0
+    cls_ohem_topk_per_pos: 0
+    cls_balance_mode: mean
+    line_iou_radius: 0.015
+    w_cls: 5.0
+    w_distill: 0.0
+    w_iou: 2.0
+    w_mask: 1.0
+    w_reg: 1.2
+    w_smooth: 0.05
+    w_xytl: 0.2
+    # DETR convention: Hungarian 1-to-1, NOT dynamic_k. Each query gets
+    # exactly one GT lane (or none, becoming a "no-object" query). With
+    # K=64 and ~5 GT lanes per image, ~5 queries are positive and 59
+    # are no-object -- a much cleaner ratio than the 192-anchor design.
+    use_lane_matching: true
+    match_cost_cls: 1.0
+    match_cost_point: 5.0
+    match_cost_iou: 2.0
+    match_cost_xytl: 0.2
+    lane_assigner: hungarian
+    dynamic_k_topk: 4
+    aux_stage_loss_weight: 1.0
+    stage1_aux_loss_weight: 0.0
+    asl_gamma_pos: 0.0
+    asl_gamma_neg: 4.0
+    asl_clip: 0.05
+    focal_alpha: 0.25
+    focal_gamma: 2.0
+    qfl_gamma: 2.0
+    lineiou_target_pow: 1.0
+  no_object_weight: 0.25
+  use_uncertainty: true
+  geometry_warmup_epochs: 1
+train:
+  lr0: 0.0002
+  backbone_lr_mult: 0.1
+  head_lr_mult: 2.0
+  weight_decay: 0.0005
+  end_epoch: 20
+  batch_size: 8
+  workers: 2
+  grad_clip_norm: 5.0
+  val_every: 1
+  save_every: 5
+  print_every: 5
+  amp:
+    kind: bfloat16
+  lr_scheduler:
+    kind: cosine
+    warmup_epochs: 2
+    warmup_start_lr_factor: 0.1
+    min_lr_factor: 0.05
+  phases:
+  - name: head_warmup
+    until_epoch: 2
+  - name: full_finetune
+    until_epoch: 999
+eval:
+  val_batches: 40
+  log_grad_cosine: true
+  grad_cos_probe_interval: 50
+  lane_exist_threshold: 0.3
+  decoded_top_k: 6
+  decoded_lane_iou_threshold: 0.5
+  decoded_lane_nms_iou: 0.5
+  decoded_score_threshold: 0.0
+  decoded_score_source: cls
+  decoded_oracle_enabled: true
+teacher:
+  lane_head_checkpoint: null

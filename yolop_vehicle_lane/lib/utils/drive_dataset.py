@@ -271,33 +271,93 @@ def _first_existing_dir(candidates: List[str]) -> Optional[str]:
     return None
 
 
-def resolve_bdd_images_100k_dir(raw_bdd_root: str) -> str:
-    """Return a directory that contains `train/` and `val/` image folders.
+def _count_image_files(folder: str) -> int:
+    if not folder or not os.path.isdir(folder):
+        return 0
+    try:
+        return sum(
+            1 for name in os.listdir(folder)
+            if name.lower().endswith(('.jpg', '.jpeg', '.png'))
+        )
+    except OSError:
+        return 0
 
-    The raw BDD snapshot can be laid out in several ways — handoff note §3:
-      * `raw/images/100k/train`
-      * `raw/bdd100k/images/100k/train`
-      * `raw/train` (rare, pre-extracted flat layout)
-    We try all three. Callers can still override via config.
+
+def _image_split_counts(root: str) -> dict:
+    return {
+        'train': _count_image_files(os.path.join(root, 'train')),
+        'val': _count_image_files(os.path.join(root, 'val')),
+    }
+
+
+def _try_extract_bdd_images(raw_bdd_root: str, ecocar_root: Optional[str]) -> bool:
+    if not ecocar_root:
+        return False
+
+    project_root = Path(ecocar_root)
+    shared_root = project_root.parent if project_root.name == 'yolop_vehicle_lane' else project_root
+    downloads_roots = [
+        os.path.join(ecocar_root, 'downloads'),
+        os.path.join(str(shared_root), 'downloads'),
+    ]
+
+    extracted = False
+    for downloads in downloads_roots:
+        image_zip = os.path.join(downloads, 'bdd100k_images_100k.zip')
+        if os.path.isfile(image_zip):
+            print(f'[BDD images] extracting or reusing marker for: {image_zip}')
+            extracted |= _extract_zip_if_needed(image_zip, raw_bdd_root)
+    return extracted
+
+
+def resolve_bdd_images_100k_dir(raw_bdd_root: str, ecocar_root: Optional[str] = None, auto_extract: bool = True) -> str:
+    """Return a directory that contains non-empty train/ and val/ image folders.
+
+    Important:
+    The official BDD label archive can also contain `100k/train` and `100k/val`,
+    but those folders contain JSON labels, not images. The previous resolver
+    only checked whether the folders existed, so it could accidentally choose
+    `/content/bdd100k_raw/100k` as the image root and then build a zero-sample
+    validation dataset. This version verifies actual image-file counts.
     """
     if not raw_bdd_root:
         raise FileNotFoundError('raw_bdd_root is empty')
-    candidates = [
-        os.path.join(raw_bdd_root, 'images', '100k'),
-        os.path.join(raw_bdd_root, 'bdd100k', 'images', '100k'),
-        os.path.join(raw_bdd_root, '100k'),
-        raw_bdd_root,
-    ]
-    for root in candidates:
-        if (os.path.isdir(os.path.join(root, 'train'))
-                and os.path.isdir(os.path.join(root, 'val'))):
-            return root
-    # Softer: return first candidate that even has `train`.
-    for root in candidates:
-        if os.path.isdir(os.path.join(root, 'train')):
-            return root
-    raise FileNotFoundError(
-        f'Could not find an images/100k-style layout under: {candidates}')
+
+    def candidates():
+        return [
+            os.path.join(raw_bdd_root, 'images', '100k'),
+            os.path.join(raw_bdd_root, 'bdd100k', 'images', '100k'),
+            os.path.join(raw_bdd_root, '100k'),
+            raw_bdd_root,
+        ]
+
+    def pick_valid_root():
+        diagnostics = []
+        for root in candidates():
+            counts = _image_split_counts(root)
+            diagnostics.append((root, counts))
+            if counts['train'] > 0 and counts['val'] > 0:
+                print(f'[BDD images] selected: {root} | train={counts["train"]}, val={counts["val"]}')
+                return root, diagnostics
+        return None, diagnostics
+
+    root, diagnostics = pick_valid_root()
+    if root is not None:
+        return root
+
+    if auto_extract:
+        did_extract = _try_extract_bdd_images(raw_bdd_root, ecocar_root)
+        if did_extract:
+            root, diagnostics = pick_valid_root()
+            if root is not None:
+                return root
+
+    msg = ['Could not find a valid BDD image root with non-empty train and val image folders.']
+    msg.append('Checked candidates:')
+    for root, counts in diagnostics:
+        msg.append(f'  - {root}: train_images={counts["train"]}, val_images={counts["val"]}')
+    msg.append('Expected official image zip: <EcoCAR>/downloads/bdd100k_images_100k.zip')
+    raise FileNotFoundError('\n'.join(msg))
 
 
 def resolve_bdd_labels_100k_dir(raw_bdd_root: str) -> str:

@@ -342,7 +342,7 @@ class CLRKDFusedSegmentationDecoder(nn.Module):
             nn.Conv2d(c1 // 2, nc, 1),
         )
 
-    def forward(self, x):
+    def forward(self, x, imgsz=None):
         p3, p4, p5 = x
         p3 = self.lateral[0](p3)
         p4 = self.lateral[1](p4)
@@ -361,7 +361,14 @@ class CLRKDFusedSegmentationDecoder(nn.Module):
 
         fused = torch.cat([p3, p4, p5], dim=1)
         fused = self.dropout(fused)
-        return self.fuse(fused)
+        out = self.fuse(fused)
+        if imgsz is not None:
+            if isinstance(imgsz, int):
+                target_size = (imgsz, imgsz)
+            else:
+                target_size = tuple(imgsz)
+            out = F.interpolate(out, size=target_size, mode="bilinear", align_corners=False)
+        return out, [out]
 
 class DeformableTransformerDecoderLayer(nn.Module):
     """

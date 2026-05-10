@@ -1,0 +1,115 @@
+run:
+  name: exp07_rmt_gca_clrkd_lane_head_joint
+  seed: 0
+  work_dir: /content/exp07_rmt_gca_clrkd_lane_head_joint
+  output_tar: /content/drive/MyDrive/EcoCAR/training_runs/exp07_rmt_gca_clrkd_lane_head_joint.tar
+dataset:
+  bdd_archive: /content/drive/MyDrive/EcoCAR/datasets/bdd100k_clrkd_curve.tar
+  local_dir: /content/bdd100k_clrkd_curve
+  max_lanes: 10
+  num_points: 72
+  image_size:
+  - 384
+  - 640
+  org_image_size:
+  - 720
+  - 1280
+  aux_mask_size:
+  - 72
+  - 128
+  vehicle_classes:
+  - vehicle
+model:
+  backbone: exp2b_rmt_gca
+  width: 0.5
+  use_aifi: true
+  yolo26:
+    source_root: null
+    model_path: null
+    feature_indices: null
+    strict: true
+  detection_head:
+    type: detr
+    num_queries: 100
+    num_classes: 1
+    embed_dim: 256
+    num_decoder_layers: 3
+    num_heads: 8
+    dim_feedforward: 1024
+  lane_head:
+    type: clrkd
+    embed_dim: 128
+    max_lanes: 10
+    num_points: 72
+    num_priors: 192
+    sample_points: 36
+    roi_refine_layers: 3
+    roi_mid_channels: 48
+    cross_attn_resize:
+    - 10
+    - 25
+    mask_size:
+    - 72
+    - 128
+    mask_aux: true
+    num_lane_classes: 7
+loss:
+  det:
+    bbox_loss_weight: 5.0
+    cls_loss_weight: 1.0
+    dn_loss_weight: 0.0
+    giou_loss_weight: 2.0
+    obj_loss_weight: 1.0
+  lambda_gate_reg: 0.001
+  lambda_lane: 0.5
+  lambda_max: 2.0
+  lambda_min: 0.2
+  lambda_mode: grad_norm_calibration
+  lane:
+    focal_alpha: 0.35
+    focal_gamma: 2.0
+    line_iou_radius: 0.015
+    w_cls: 2.0
+    w_distill: 0.0
+    w_iou: 2.0
+    w_mask: 1.0
+    w_reg: 1.2
+    w_smooth: 0.05
+    w_xytl: 0.2
+    use_lane_matching: true
+    match_cost_cls: 1.0
+    match_cost_point: 5.0
+    match_cost_iou: 2.0
+    match_cost_xytl: 0.2
+    cls_balance_mode: balanced
+    lane_assigner: dynamic_k
+    dynamic_k_topk: 4
+    aux_stage_loss_weight: 1.0
+  no_object_weight: 0.25
+  use_uncertainty: false
+  geometry_warmup_epochs: 3
+train:
+  lr0: 0.0002
+  backbone_lr_mult: 0.1
+  head_lr_mult: 2.0
+  weight_decay: 0.0005
+  end_epoch: 10
+  batch_size: 8
+  workers: 2
+  grad_clip_norm: 5.0
+  val_every: 1
+  save_every: 5
+  print_every: 5
+  phases:
+  - name: head_warmup
+    until_epoch: 1
+  - name: adapter_warmup
+    until_epoch: 3
+  - name: full_finetune
+    until_epoch: 999
+eval:
+  val_batches: 40
+  log_grad_cosine: true
+  lane_exist_threshold: 0.3
+teacher:
+  lane_head_checkpoint: null

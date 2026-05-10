@@ -1,0 +1,7 @@
+OK exp01_rmt_shared_joint.yaml
+  lane_shape=(1, 2, 72, 2) det_shape=(1, 4, 4)
+  lane_loss=3.1426 det_loss=3.1297 grad_cos=-0.1454 lambda_lane=0.0800
+OK exp02_rmt_gca_joint.yaml
+  lane_shape=(1, 2, 72, 2) det_shape=(1, 4, 4)
+  lane_loss=2.9792 det_loss=3.0836 grad_cos=-0.2852 lambda_lane=0.1405
+  gate_stats={'gate/det_mean': 0.4996687173843384, 'gate/lane_mean': 0.4989708960056305, 'gate/det_sat_low': 0.0, 'gate/det_sat_high': 0.0, 'gate/lane_sat_low': 0.0, 'gate/lane_sat_high': 0.0}

@@ -106,9 +106,15 @@ def train(cfg, train_loader, model, criterion, optimizer, scaler, epoch, num_bat
         if grad_clip > 0:
             scaler.unscale_(optimizer)
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            if rank in [-1, 0] and (not torch.isfinite(grad_norm).item()):
-                logger.warning(f'Non-finite grad norm at epoch={epoch} iter={i}: {float(grad_norm)}. Skipping optimizer step.')
+            grad_norm_is_finite = bool(torch.isfinite(grad_norm).item())
+            if not grad_norm_is_finite:
+                if rank in [-1, 0]:
+                    logger.warning(
+                        f'Non-finite grad norm at epoch={epoch} iter={i}: {float(grad_norm)}. '
+                        'Skipping optimizer step and resetting GradScaler state.'
+                    )
                 optimizer.zero_grad(set_to_none=True)
+                scaler.update()
                 end = time.time()
                 continue
         scaler.step(optimizer)
@@ -152,8 +158,10 @@ def validate(epoch, config, val_loader, val_dataset, model, criterion, output_di
     weights = None
 
     save_dir = output_dir + os.path.sep + 'visualization'
-    if not os.path.exists(save_dir):
-        os.mkdir(save_dir)
+    # Create the full metrics/visualization tree. This must be robust when
+    # notebook 03 evaluates a partial Stage 1 run before the final 200-epoch
+    # metrics directory has ever been created.
+    os.makedirs(save_dir, exist_ok=True)
 
     _, imgsz = [check_img_size(x, s=max_stride) for x in config.MODEL.IMAGE_SIZE]
     batch_size = config.TRAIN.BATCH_SIZE_PER_GPU * len(config.GPUS)

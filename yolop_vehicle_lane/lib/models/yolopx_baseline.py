@@ -79,6 +79,22 @@ class YOLOPXVehicleLaneNet(nn.Module):
         lane = self.lane_seg_head(lane)
         return det_out, lane
 
+    @torch.no_grad()
+    def predict(self, x):
+        """Inference/export wrapper used by Stage1 notebooks 06 and 07.
+
+        `forward()` is kept as the training/evaluation contract. This wrapper
+        temporarily switches to eval mode so YOLOPX seg_head applies its sigmoid,
+        then returns a stable single-channel foreground lane probability.
+        """
+        was_training = self.training
+        self.eval()
+        det_out, lane_out = self.forward(x)
+        lane_prob = lane_out[:, 1:2] if lane_out.shape[1] == 2 else lane_out[:, :1]
+        if was_training:
+            self.train()
+        return det_out, lane_prob
+
     def fuse(self):
         for m in self.modules():
             if isinstance(m, RepConv):

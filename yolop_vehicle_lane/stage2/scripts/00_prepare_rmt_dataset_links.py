@@ -70,6 +70,8 @@ def run_curve_prepare(args: argparse.Namespace) -> None:
         command += ["--train-lane-json", args.train_lane_json]
     if args.val_lane_json:
         command += ["--val-lane-json", args.val_lane_json]
+    if args.pack_to:
+        command += ["--pack-to", args.pack_to]
 
     print("[info] Preparing CLRKDNet curve/prior labels:")
     print(" ".join(command))
@@ -93,6 +95,7 @@ def main() -> None:
     parser.add_argument("--train-lane-json", default=None)
     parser.add_argument("--val-lane-json", default=None)
     parser.add_argument("--mask-thickness", type=int, default=5)
+    parser.add_argument("--pack-to", default=None)
     args = parser.parse_args()
 
     dataset_root = Path(args.dataset_root).expanduser().resolve()

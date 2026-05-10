@@ -1,0 +1,80 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "f205122b",
+   "metadata": {},
+   "source": [
+    "# Stage 2 Notebook 04 - Exp3A real YOLO26 backbone/neck + DETR + CLRKD"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "0d995b2c",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import os, sys, subprocess, textwrap\n",
+    "from google.colab import drive\n",
+    "drive.mount('/content/drive')\n",
+    "\n",
+    "REPO_ROOT = '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane'\n",
+    "if not os.path.isdir(REPO_ROOT):\n",
+    "    raise FileNotFoundError(f'Missing project root: {REPO_ROOT}')\n",
+    "os.chdir(REPO_ROOT)\n",
+    "if REPO_ROOT not in sys.path:\n",
+    "    sys.path.insert(0, REPO_ROOT)\n",
+    "\n",
+    "subprocess.check_call([sys.executable, '-m', 'pip', 'install', '-q', 'pyyaml', 'scipy', 'opencv-python-headless', 'tqdm', 'matplotlib'])\n",
+    "print('repo:', REPO_ROOT)\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "9842c05f",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import os\n",
+    "os.environ.setdefault('YOLO26_ROOT', '/content/drive/MyDrive/EcoCAR/YOLO26')\n",
+    "print('YOLO26_ROOT =', os.environ['YOLO26_ROOT'])\n",
+    "print('Change YOLO26_ROOT or set YOLO26_MODEL before running if your real YOLO26 project/model is elsewhere.')\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "0fbfd267",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import os, subprocess, sys\n",
+    "CONFIG = 'stage2/configs/exp04_yolo26_real_detr_clrkd_joint.yaml'\n",
+    "CURVE_TAR = '/content/drive/MyDrive/EcoCAR/datasets/bdd100k_clrkd_curve.tar'\n",
+    "CURVE_ROOT = '/content/bdd100k_clrkd_curve'\n",
+    "cmd = [\n",
+    "    sys.executable, 'stage2/scripts/train_joint_model_experiment.py',\n",
+    "    '--config', CONFIG,\n",
+    "    '--curve-tar', CURVE_TAR,\n",
+    "    '--curve-root', CURVE_ROOT,\n",
+    "    '--force-extract',\n",
+    "]\n",
+    "print(' '.join(cmd))\n",
+    "subprocess.check_call(cmd)\n"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "name": "python3"
+  },
+  "language_info": {
+   "name": "python"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}

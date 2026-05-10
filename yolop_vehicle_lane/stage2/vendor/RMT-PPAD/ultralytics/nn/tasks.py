@@ -1284,12 +1284,12 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args.insert(1, [ch[x] for x in f])
         elif m is MTDETRDecoder:  # special case, channels arg must be passed in index 1
             nc_cfg = args[0]
-            extra_args = args[1:]
-            args_list = [nc_cfg['detection']]  ### JW split detection and segmentation nc.
-            args_list.insert(1, [ch[x] for x in f])
-            args_list.append(nc_cfg['segmentation'])
-            args_list.extend(extra_args)
-            args = args_list
+            extra_args = list(args[1:])
+            seg_decoder = extra_args.pop(0) if extra_args and isinstance(extra_args[0], str) else "rmt"
+            defaults = [256, 300, 4, 8, 6, 1024, 0.0, nn.ReLU(), -1, 100, 0.5, 1.0, False]
+            for j, value in enumerate(extra_args[:len(defaults)]):
+                defaults[j] = value
+            args = [nc_cfg['detection'], [ch[x] for x in f], nc_cfg['segmentation'], *defaults, seg_decoder]
         elif m is CBLinear:
             c2 = args[0]
             c1 = ch[f]
